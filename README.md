@@ -12,11 +12,12 @@ service.
 ## What it does
 
 - **Tenant resolution** — a pluggable `TenantResolver` chain figures out
-  which tenant a request belongs to (API key, session, header, subdomain,
-  or a strategy you write yourself), for both HTTP and gRPC.
-- **User + API key management** — interfaces for storing and looking up
-  tenants, users, and API keys (both tenant-level service keys and
-  user-level keys), so identity data can live in whatever database you
+  which tenant a request belongs to (API key, mTLS client cert, session,
+  header, subdomain, or a strategy you write yourself), for both HTTP and
+  gRPC. A tenant can support multiple credential types at once.
+- **User + credential management** — interfaces for storing and looking
+  up tenants, users, API keys, and client certs (tenant-level or
+  user-level), so identity data can live in whatever database you
   already use.
 - **Pluggable identity** — the same `IdentityProvider` interface is
   satisfied by a built-in local implementation (WebAuthn/bcrypt + sessions)
