@@ -358,6 +358,28 @@ func TestStore_CreateAndGetUser(t *testing.T) {
 	}
 }
 
+func TestStore_GetUser_MutatingResultDoesNotCorruptStore(t *testing.T) {
+	s := memstore.New()
+	ctx := context.Background()
+	if err := s.CreateUser(ctx, &tenantkit.Identity{UserID: "u1", TenantID: "acme", Username: "alice", Roles: []string{"member"}}); err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+
+	got, err := s.GetUser(ctx, "u1")
+	if err != nil {
+		t.Fatalf("GetUser: %v", err)
+	}
+	got.Roles[0] = "admin"
+
+	again, err := s.GetUser(ctx, "u1")
+	if err != nil {
+		t.Fatalf("GetUser: %v", err)
+	}
+	if again.Roles[0] != "member" {
+		t.Errorf("mutating a returned Identity's Roles corrupted the store's own copy: got %q, want %q", again.Roles[0], "member")
+	}
+}
+
 func TestStore_GetUser_NotFound(t *testing.T) {
 	s := memstore.New()
 	_, err := s.GetUser(context.Background(), "nope")
@@ -654,8 +676,8 @@ import (
 	"github.com/TURNERO/tenantkit/store"
 )
 
-// Store is an in-memory store.TenantStore, store.UserStore, and
-// store.APIKeyStore.
+// Store is an in-memory store.TenantStore, store.UserStore,
+// store.APIKeyStore, and store.ClientCertStore.
 type Store struct {
 	mu sync.Mutex
 
@@ -745,6 +767,10 @@ func (s *Store) GetUser(ctx context.Context, userID string) (*tenantkit.Identity
 		return nil, store.ErrNotFound
 	}
 	cp := *u
+	// Roles is a slice -- a struct copy only copies the slice header, not
+	// its backing array, so without this the caller could mutate the
+	// store's own data through the returned Identity.
+	cp.Roles = append([]string(nil), u.Roles...)
 	return &cp, nil
 }
 
@@ -756,6 +782,7 @@ func (s *Store) GetUserByUsername(ctx context.Context, tenantID, username string
 		return nil, store.ErrNotFound
 	}
 	cp := *s.users[userID]
+	cp.Roles = append([]string(nil), s.users[userID].Roles...)
 	return &cp, nil
 }
 
@@ -770,6 +797,9 @@ func (s *Store) CreateUser(ctx context.Context, u *tenantkit.Identity) error {
 		return store.ErrAlreadyExists
 	}
 	cp := *u
+	// Deep-copy Roles so a caller mutating the slice they passed in
+	// after CreateUser returns can't corrupt the stored record.
+	cp.Roles = append([]string(nil), u.Roles...)
 	s.users[u.UserID] = &cp
 	s.usersByKey[key] = u.UserID
 	return nil
