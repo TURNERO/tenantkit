@@ -869,8 +869,8 @@ implementation for tests, both tenantkit's own and a consumer's."
 - Test: `store/memstore/conformance_test.go`
 
 **Interfaces:**
-- Consumes: `store.TenantStore`/`UserStore`/`APIKeyStore` (Task 2), `memstore.New()` (Task 2).
-- Produces: `storetest.TestTenantStore(t *testing.T, s store.TenantStore)`, `storetest.TestUserStore(t *testing.T, s store.UserStore)`, `storetest.TestAPIKeyStore(t *testing.T, s store.APIKeyStore)`. Any future store implementation (in this repo or a consumer's) calls these against a fresh instance of itself to prove conformance.
+- Consumes: `store.TenantStore`/`UserStore`/`APIKeyStore`/`ClientCertStore` (Task 2), `memstore.New()` (Task 2).
+- Produces: `storetest.TestTenantStore(t *testing.T, s store.TenantStore)`, `storetest.TestUserStore(t *testing.T, s store.UserStore)`, `storetest.TestAPIKeyStore(t *testing.T, s store.APIKeyStore)`, `storetest.TestClientCertStore(t *testing.T, s store.ClientCertStore)`. Any future store implementation (in this repo or a consumer's) calls these against a fresh instance of itself to prove conformance.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -897,6 +897,10 @@ func TestMemstoreConformsToUserStore(t *testing.T) {
 func TestMemstoreConformsToAPIKeyStore(t *testing.T) {
 	storetest.TestAPIKeyStore(t, memstore.New())
 }
+
+func TestMemstoreConformsToClientCertStore(t *testing.T) {
+	storetest.TestClientCertStore(t, memstore.New())
+}
 ```
 
 - [ ] **Step 2: Run the test to verify it fails**
@@ -914,8 +918,8 @@ Create `storetest/storetest.go`:
 // tenantkit's store interfaces. A consumer's own store implementation
 // (SQL, NoSQL, or otherwise) can run these against a fresh instance to
 // prove it satisfies the documented behavior of store.TenantStore,
-// store.UserStore, and store.APIKeyStore -- not just that it compiles
-// against the interface.
+// store.UserStore, store.APIKeyStore, and store.ClientCertStore -- not
+// just that it compiles against the interface.
 package storetest
 
 import (
@@ -1132,13 +1136,73 @@ func TestAPIKeyStore(t *testing.T, s store.APIKeyStore) {
 		}
 	})
 }
+
+// TestClientCertStore runs a battery of subtests against s. Pass a
+// fresh, empty store.
+func TestClientCertStore(t *testing.T, s store.ClientCertStore) {
+	t.Helper()
+	ctx := context.Background()
+
+	t.Run("CreateAndGet", func(t *testing.T) {
+		want := &tenantkit.ClientCert{Fingerprint: "conformance-fp-1", TenantID: "conformance-tenant"}
+		if err := s.CreateClientCert(ctx, want); err != nil {
+			t.Fatalf("CreateClientCert: %v", err)
+		}
+		got, err := s.GetClientCertByFingerprint(ctx, "conformance-fp-1")
+		if err != nil {
+			t.Fatalf("GetClientCertByFingerprint: %v", err)
+		}
+		if got.Fingerprint != want.Fingerprint || got.TenantID != want.TenantID {
+			t.Errorf("GetClientCertByFingerprint = %+v, want %+v", got, want)
+		}
+	})
+
+	t.Run("GetNotFound", func(t *testing.T) {
+		_, err := s.GetClientCertByFingerprint(ctx, "conformance-does-not-exist")
+		if !errors.Is(err, store.ErrNotFound) {
+			t.Errorf("GetClientCertByFingerprint error = %v, want errors.Is(err, store.ErrNotFound)", err)
+		}
+	})
+
+	t.Run("CreateDuplicateFails", func(t *testing.T) {
+		fp := "conformance-fp-dupe"
+		if err := s.CreateClientCert(ctx, &tenantkit.ClientCert{Fingerprint: fp, TenantID: "conformance-tenant"}); err != nil {
+			t.Fatalf("first CreateClientCert: %v", err)
+		}
+		err := s.CreateClientCert(ctx, &tenantkit.ClientCert{Fingerprint: fp, TenantID: "conformance-tenant-2"})
+		if !errors.Is(err, store.ErrAlreadyExists) {
+			t.Errorf("CreateClientCert duplicate error = %v, want errors.Is(err, store.ErrAlreadyExists)", err)
+		}
+	})
+
+	t.Run("Revoke", func(t *testing.T) {
+		fp := "conformance-fp-revoke"
+		if err := s.CreateClientCert(ctx, &tenantkit.ClientCert{Fingerprint: fp, TenantID: "conformance-tenant"}); err != nil {
+			t.Fatalf("CreateClientCert: %v", err)
+		}
+		if err := s.RevokeClientCert(ctx, fp); err != nil {
+			t.Fatalf("RevokeClientCert: %v", err)
+		}
+		_, err := s.GetClientCertByFingerprint(ctx, fp)
+		if !errors.Is(err, store.ErrNotFound) {
+			t.Errorf("GetClientCertByFingerprint after revoke error = %v, want errors.Is(err, store.ErrNotFound)", err)
+		}
+	})
+
+	t.Run("RevokeNotFound", func(t *testing.T) {
+		err := s.RevokeClientCert(ctx, "conformance-does-not-exist-2")
+		if !errors.Is(err, store.ErrNotFound) {
+			t.Errorf("RevokeClientCert error = %v, want errors.Is(err, store.ErrNotFound)", err)
+		}
+	})
+}
 ```
 
 - [ ] **Step 4: Run the test to verify it passes**
 
 Run: `go test ./store/... -run TestMemstoreConformsTo -v`
 
-Expected: PASS, all 3 tests (each running its own subtests).
+Expected: PASS, all 4 tests (each running its own subtests).
 
 - [ ] **Step 5: Commit**
 
@@ -1146,11 +1210,12 @@ Expected: PASS, all 3 tests (each running its own subtests).
 git add storetest/storetest.go store/memstore/conformance_test.go
 git commit -m "feat: add storetest interface-conformance suite
 
-storetest.TestTenantStore/TestUserStore/TestAPIKeyStore let any store
-implementation prove it satisfies the documented contract (not-found
-and already-exists behavior, tenant scoping), not just that it
-compiles against the interface. Run here against memstore as both a
-test of storetest itself and proof memstore conforms."
+storetest.TestTenantStore/TestUserStore/TestAPIKeyStore/
+TestClientCertStore let any store implementation prove it satisfies
+the documented contract (not-found and already-exists behavior,
+tenant scoping), not just that it compiles against the interface. Run
+here against memstore as both a test of storetest itself and proof
+memstore conforms.
 ```
 
 ---
