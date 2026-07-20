@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Stand up tenantkit's foundation -- the Go module, core types, request-context helpers, the three store interfaces, a reusable in-memory reference store, an interface-conformance test suite, and the crypto/validation helper functions everything else depends on.
+**Goal:** Stand up tenantkit's foundation -- the Go module, core types, request-context helpers, the four store interfaces (including mTLS client-cert support alongside API keys), a reusable in-memory reference store, an interface-conformance test suite, and the crypto/validation helper functions everything else depends on.
 
 **Architecture:** A single new Go module (`github.com/TURNERO/tenantkit`), stdlib-only. Core types and context helpers live in the root package; storage is interfaces-only (`store`), proven by a conformance-test suite (`storetest`) that both tenantkit's own in-memory reference implementation (`store/memstore`) and any future consumer implementation can run against themselves.
 
@@ -29,7 +29,7 @@
 
 **Interfaces:**
 - Consumes: nothing (first task).
-- Produces: `tenantkit.Tenant{ID, DisplayName, Active}`, `tenantkit.Identity{UserID, TenantID, Username, Roles}`, `tenantkit.APIKey{Hash, TenantID, UserID}`, and `tenantkit.WithTenant`/`TenantFromContext`/`WithIdentity`/`IdentityFromContext`. Every later task in this plan (and every future plan) imports these.
+- Produces: `tenantkit.Tenant{ID, DisplayName, Active}`, `tenantkit.Identity{UserID, TenantID, Username, Roles}`, `tenantkit.APIKey{Hash, TenantID, UserID}`, `tenantkit.ClientCert{Fingerprint, TenantID, UserID}`, and `tenantkit.WithTenant`/`TenantFromContext`/`WithIdentity`/`IdentityFromContext`. Every later task in this plan (and every future plan) imports these.
 
 - [ ] **Step 1: Initialize the Go module**
 
@@ -82,6 +82,18 @@ type APIKey struct {
 	Hash     string
 	TenantID string
 	UserID   string
+}
+
+// ClientCert is an mTLS client-certificate credential used for
+// tenant-scoped access, an alternative (or complement) to APIKey.
+// Fingerprint is the SHA-256 hex digest of the DER-encoded cert -- not
+// a secret, just an identifier; TLS itself already verified the cert
+// against a CA before tenantkit ever sees the request. UserID is empty
+// for a tenant-level cert, non-empty for a user-level cert.
+type ClientCert struct {
+	Fingerprint string
+	TenantID    string
+	UserID      string
 }
 ```
 
@@ -208,8 +220,8 @@ git commit -m "feat: add core types and request-context helpers
 
 First piece of the tenantkit foundation (see
 docs/superpowers/specs/2026-07-20-tenantkit-design.md). Tenant,
-Identity, and APIKey are the shared vocabulary every other package
-builds on; WithTenant/TenantFromContext and WithIdentity/
+Identity, APIKey, and ClientCert are the shared vocabulary every other
+package builds on; WithTenant/TenantFromContext and WithIdentity/
 IdentityFromContext are how httpmw/grpcmw (a later plan) will pass a
 resolved tenant and identity down to request handlers."
 ```
@@ -224,8 +236,8 @@ resolved tenant and identity down to request handlers."
 - Test: `store/memstore/memstore_test.go`
 
 **Interfaces:**
-- Consumes: `tenantkit.Tenant`, `tenantkit.Identity`, `tenantkit.APIKey` (Task 1).
-- Produces: `store.TenantStore`, `store.UserStore`, `store.APIKeyStore` interfaces; `store.ErrNotFound`, `store.ErrAlreadyExists` sentinel errors; `memstore.New() *memstore.Store`, a value satisfying all three interfaces. Task 3 (`storetest`) and Task 4 (`RotateAPIKey`'s test) both depend on `memstore.New()` existing with this exact signature.
+- Consumes: `tenantkit.Tenant`, `tenantkit.Identity`, `tenantkit.APIKey`, `tenantkit.ClientCert` (Task 1).
+- Produces: `store.TenantStore`, `store.UserStore`, `store.APIKeyStore`, `store.ClientCertStore` interfaces; `store.ErrNotFound`, `store.ErrAlreadyExists` sentinel errors; `memstore.New() *memstore.Store`, a value satisfying all four interfaces. Task 3 (`storetest`) and Task 4 (`RotateAPIKey`'s test) both depend on `memstore.New()` existing with this exact signature.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -466,6 +478,66 @@ func TestStore_RevokeAPIKey_NotFound(t *testing.T) {
 		t.Errorf("RevokeAPIKey error = %v, want errors.Is(err, store.ErrNotFound)", err)
 	}
 }
+
+func TestStore_CreateAndGetClientCert(t *testing.T) {
+	s := memstore.New()
+	ctx := context.Background()
+	want := &tenantkit.ClientCert{Fingerprint: "cafef00d", TenantID: "acme"}
+	if err := s.CreateClientCert(ctx, want); err != nil {
+		t.Fatalf("CreateClientCert: %v", err)
+	}
+	got, err := s.GetClientCertByFingerprint(ctx, "cafef00d")
+	if err != nil {
+		t.Fatalf("GetClientCertByFingerprint: %v", err)
+	}
+	if *got != *want {
+		t.Errorf("GetClientCertByFingerprint = %+v, want %+v", got, want)
+	}
+}
+
+func TestStore_GetClientCertByFingerprint_NotFound(t *testing.T) {
+	s := memstore.New()
+	_, err := s.GetClientCertByFingerprint(context.Background(), "nope")
+	if !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("GetClientCertByFingerprint error = %v, want errors.Is(err, store.ErrNotFound)", err)
+	}
+}
+
+func TestStore_CreateClientCert_DuplicateFails(t *testing.T) {
+	s := memstore.New()
+	ctx := context.Background()
+	if err := s.CreateClientCert(ctx, &tenantkit.ClientCert{Fingerprint: "cafef00d", TenantID: "acme"}); err != nil {
+		t.Fatalf("first CreateClientCert: %v", err)
+	}
+	err := s.CreateClientCert(ctx, &tenantkit.ClientCert{Fingerprint: "cafef00d", TenantID: "globex"})
+	if !errors.Is(err, store.ErrAlreadyExists) {
+		t.Errorf("CreateClientCert duplicate error = %v, want errors.Is(err, store.ErrAlreadyExists)", err)
+	}
+}
+
+func TestStore_RevokeClientCert(t *testing.T) {
+	s := memstore.New()
+	ctx := context.Background()
+	if err := s.CreateClientCert(ctx, &tenantkit.ClientCert{Fingerprint: "cafef00d", TenantID: "acme"}); err != nil {
+		t.Fatalf("CreateClientCert: %v", err)
+	}
+
+	if err := s.RevokeClientCert(ctx, "cafef00d"); err != nil {
+		t.Fatalf("RevokeClientCert: %v", err)
+	}
+	_, err := s.GetClientCertByFingerprint(ctx, "cafef00d")
+	if !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("GetClientCertByFingerprint after revoke error = %v, want errors.Is(err, store.ErrNotFound)", err)
+	}
+}
+
+func TestStore_RevokeClientCert_NotFound(t *testing.T) {
+	s := memstore.New()
+	err := s.RevokeClientCert(context.Background(), "nope")
+	if !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("RevokeClientCert error = %v, want errors.Is(err, store.ErrNotFound)", err)
+	}
+}
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
@@ -543,6 +615,23 @@ type APIKeyStore interface {
 	// ErrNotFound if it doesn't exist.
 	RevokeAPIKey(ctx context.Context, hash string) error
 }
+
+// ClientCertStore stores and retrieves mTLS client-certificate
+// records, keyed by the SHA-256 hex fingerprint of the DER-encoded
+// cert -- not a secret, just an identifier; the trust decision (is
+// this cert signed by a CA we trust) happens in TLS itself, before
+// tenantkit ever sees the request.
+type ClientCertStore interface {
+	// GetClientCertByFingerprint returns the cert with the given
+	// fingerprint, or ErrNotFound.
+	GetClientCertByFingerprint(ctx context.Context, fingerprint string) (*tenantkit.ClientCert, error)
+	// CreateClientCert inserts c, or returns ErrAlreadyExists if a cert
+	// with the same fingerprint already exists.
+	CreateClientCert(ctx context.Context, c *tenantkit.ClientCert) error
+	// RevokeClientCert removes the cert with the given fingerprint, or
+	// returns ErrNotFound if it doesn't exist.
+	RevokeClientCert(ctx context.Context, fingerprint string) error
+}
 ```
 
 - [ ] **Step 4: Write the in-memory reference store**
@@ -576,6 +665,8 @@ type Store struct {
 	usersByKey map[usernameKey]string // (tenantID, username) -> userID
 
 	apiKeys map[string]*tenantkit.APIKey
+
+	clientCerts map[string]*tenantkit.ClientCert
 }
 
 type usernameKey struct {
@@ -586,17 +677,19 @@ type usernameKey struct {
 // New returns an empty Store.
 func New() *Store {
 	return &Store{
-		tenants:    make(map[string]*tenantkit.Tenant),
-		users:      make(map[string]*tenantkit.Identity),
-		usersByKey: make(map[usernameKey]string),
-		apiKeys:    make(map[string]*tenantkit.APIKey),
+		tenants:     make(map[string]*tenantkit.Tenant),
+		users:       make(map[string]*tenantkit.Identity),
+		usersByKey:  make(map[usernameKey]string),
+		apiKeys:     make(map[string]*tenantkit.APIKey),
+		clientCerts: make(map[string]*tenantkit.ClientCert),
 	}
 }
 
 var (
-	_ store.TenantStore  = (*Store)(nil)
-	_ store.UserStore    = (*Store)(nil)
-	_ store.APIKeyStore  = (*Store)(nil)
+	_ store.TenantStore     = (*Store)(nil)
+	_ store.UserStore       = (*Store)(nil)
+	_ store.APIKeyStore     = (*Store)(nil)
+	_ store.ClientCertStore = (*Store)(nil)
 )
 
 func (s *Store) GetTenant(ctx context.Context, tenantID string) (*tenantkit.Tenant, error) {
@@ -713,6 +806,38 @@ func (s *Store) RevokeAPIKey(ctx context.Context, hash string) error {
 	delete(s.apiKeys, hash)
 	return nil
 }
+
+func (s *Store) GetClientCertByFingerprint(ctx context.Context, fingerprint string) (*tenantkit.ClientCert, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	c, ok := s.clientCerts[fingerprint]
+	if !ok {
+		return nil, store.ErrNotFound
+	}
+	cp := *c
+	return &cp, nil
+}
+
+func (s *Store) CreateClientCert(ctx context.Context, c *tenantkit.ClientCert) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.clientCerts[c.Fingerprint]; ok {
+		return store.ErrAlreadyExists
+	}
+	cp := *c
+	s.clientCerts[c.Fingerprint] = &cp
+	return nil
+}
+
+func (s *Store) RevokeClientCert(ctx context.Context, fingerprint string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.clientCerts[fingerprint]; !ok {
+		return store.ErrNotFound
+	}
+	delete(s.clientCerts, fingerprint)
+	return nil
+}
 ```
 
 - [ ] **Step 5: Run the tests to verify they pass**
@@ -727,10 +852,12 @@ Expected: PASS, all tests in `store/memstore/memstore_test.go`.
 git add store/store.go store/memstore/memstore.go store/memstore/memstore_test.go
 git commit -m "feat: add store interfaces and in-memory reference store
 
-TenantStore/UserStore/APIKeyStore (store/store.go) are tenantkit's
-storage contract -- no implementation ships against a real database.
-store/memstore is an in-memory implementation for tests, both
-tenantkit's own and a consumer's."
+TenantStore/UserStore/APIKeyStore/ClientCertStore (store/store.go) are
+tenantkit's storage contract -- no implementation ships against a real
+database. ClientCertStore supports mTLS as a credential type alongside
+API keys, keyed by cert fingerprint rather than a secret hash since a
+fingerprint isn't sensitive. store/memstore is an in-memory
+implementation for tests, both tenantkit's own and a consumer's."
 ```
 
 ---
