@@ -101,6 +101,7 @@ type Tenant struct {
 type Identity struct {
     UserID   string
     TenantID string
+    Username string // matches store.UserStore.GetUserByUsername's lookup key
     Roles    []string // opaque; tenantkit does not interpret these
 }
 
