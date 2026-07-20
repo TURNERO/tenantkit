@@ -26,8 +26,9 @@ A Go library that:
   since that's inherently store-specific and out of reach of a generic
   library.
 - Handles **user management** for a tenant: both human users (via a
-  pluggable `IdentityProvider`) and API keys (service/ingestion credentials),
-  with keys supported at both the tenant level and the user level.
+  pluggable `IdentityProvider`) and service credentials (API keys or
+  mTLS client certs -- a tenant can support either or both), with API
+  keys supported at both the tenant level and the user level.
 - Lets identity be **abstracted to an external system**: the same
   `IdentityProvider` interface that a built-in local (WebAuthn/bcrypt +
   session) implementation satisfies is also satisfied by an OIDC adapter, so
@@ -70,8 +71,9 @@ One Go module, `github.com/TURNERO/tenantkit`, split by responsibility:
     external OIDC-compliant IdP via `github.com/coreos/go-oidc/v3` and
     `golang.org/x/oauth2`.
 - **`tenantkit/resolve`** -- the `TenantResolver` interface plus built-in
-  strategies: API-key resolver, session/identity-claim resolver, header
-  resolver, subdomain resolver. Composable as an explicitly ordered chain.
+  strategies: API-key resolver, client-cert (mTLS) resolver,
+  session/identity-claim resolver, header resolver, subdomain resolver.
+  Composable as an explicitly ordered chain.
 - **`tenantkit/httpmw`** -- `net/http` middleware wiring a resolver chain +
   an `IdentityProvider` + the store interfaces together, populating request
   context.
@@ -110,6 +112,12 @@ type APIKey struct {
     TenantID string
     UserID   string // empty = tenant-level key, non-empty = user-level key
 }
+
+type ClientCert struct {
+    Fingerprint string // SHA-256 hex of the DER-encoded cert; not a secret, just an identifier
+    TenantID    string
+    UserID      string // empty = tenant-level cert, non-empty = user-level cert
+}
 ```
 
 ```go
@@ -131,6 +139,12 @@ type APIKeyStore interface {
     GetAPIKeyByHash(ctx context.Context, hash string) (*APIKey, error)
     CreateAPIKey(ctx context.Context, k *APIKey) error
     RevokeAPIKey(ctx context.Context, hash string) error
+}
+
+type ClientCertStore interface {
+    GetClientCertByFingerprint(ctx context.Context, fingerprint string) (*ClientCert, error)
+    CreateClientCert(ctx context.Context, c *ClientCert) error
+    RevokeClientCert(ctx context.Context, fingerprint string) error
 }
 ```
 
@@ -156,6 +170,19 @@ the chain fails immediately rather than falling through to the next
 strategy. Falling through on bad credentials is a real vulnerability (e.g. a
 rejected API key silently retried as a spoofable header) -- only genuine
 absence of that credential type (`ok=false`) allows the chain to continue.
+
+The built-in client-cert resolver reads the already-verified peer
+certificate off the connection (`r.TLS.PeerCertificates` for HTTP, the
+gRPC peer's `credentials.TLSInfo` for gRPC) and looks up its fingerprint
+via `ClientCertStore` -- tenantkit only resolves identity from a cert
+that TLS has already verified against *some* CA pool; it never issues
+certs, runs a CA, or manages rotation. That's the consumer's
+infrastructure, same as it already owns TLS termination. This also means
+the resolver only works when the request actually reaches tenantkit's
+process over mTLS-terminated TLS -- if a load balancer or edge proxy
+terminates TLS before the app, `PeerCertificates` won't be populated
+there, and either the LB needs to forward cert details some other way or
+this resolver isn't usable for that deployment.
 
 Pure helper functions (no interface, just functions any admin tool needs)
 live alongside `store`: generating a random high-entropy secret, hashing it
@@ -226,6 +253,11 @@ database driver).
   valid `tenantkit.TenantStore`.
 - **`identity/oidc` tests**: run against a mocked/test OIDC provider (no
   network dependency), not a real Auth0/Okta account.
+- **Client-cert resolver tests**: use Go's `crypto/x509`/`crypto/tls` to
+  generate a self-signed test CA and leaf cert in-process (`httptest`
+  supports serving/dialing with a custom `tls.Config`) -- no external CA
+  or real certs needed, same no-network-dependency bar as the rest of
+  this list.
 - **No testcontainers, no Docker/Podman requirement** for tenantkit's own
   CI -- that dependency is specific to consumers that need a real database
   (like otel-ingestor's ClickHouse-backed tests), not to tenantkit itself.
