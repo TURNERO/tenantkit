@@ -39,9 +39,11 @@ service.
 - **No authorization/RBAC engine.** Identities carry a list of role
   strings; interpreting them is up to you. Pair tenantkit with a policy
   engine if you need one.
-- **No opinionated admin API.** A reference CLI (`cmd/tenantkit-admin`) is
-  included as a starting point for tenant/user/key provisioning, meant to
-  be forked or wrapped rather than run unmodified in production.
+- **No opinionated admin HTTP API.** Tenant/user/key provisioning is a
+  CLI (`cmd/tenantkit-admin`), production-usable on its own (subcommands,
+  confirmation prompts, `--dry-run`, `--json` output) and backed by an
+  importable operations package (`tenantkit/admin`) for consumers who
+  need to compose provisioning with their own extra steps.
 
 ## Status
 
