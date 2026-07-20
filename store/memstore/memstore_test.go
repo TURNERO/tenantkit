@@ -112,6 +112,28 @@ func TestStore_CreateAndGetUser(t *testing.T) {
 	}
 }
 
+func TestStore_GetUser_MutatingResultDoesNotCorruptStore(t *testing.T) {
+	s := memstore.New()
+	ctx := context.Background()
+	if err := s.CreateUser(ctx, &tenantkit.Identity{UserID: "u1", TenantID: "acme", Username: "alice", Roles: []string{"member"}}); err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+
+	got, err := s.GetUser(ctx, "u1")
+	if err != nil {
+		t.Fatalf("GetUser: %v", err)
+	}
+	got.Roles[0] = "admin"
+
+	again, err := s.GetUser(ctx, "u1")
+	if err != nil {
+		t.Fatalf("GetUser (second fetch): %v", err)
+	}
+	if again.Roles[0] != "member" {
+		t.Errorf("GetUser Roles[0] = %q after caller mutated a previous result, want %q (store's own copy was corrupted)", again.Roles[0], "member")
+	}
+}
+
 func TestStore_GetUser_NotFound(t *testing.T) {
 	s := memstore.New()
 	_, err := s.GetUser(context.Background(), "nope")

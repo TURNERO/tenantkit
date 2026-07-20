@@ -13,8 +13,8 @@ import (
 	"github.com/TURNERO/tenantkit/store"
 )
 
-// Store is an in-memory store.TenantStore, store.UserStore, and
-// store.APIKeyStore.
+// Store is an in-memory store.TenantStore, store.UserStore,
+// store.APIKeyStore, and store.ClientCertStore.
 type Store struct {
 	mu sync.Mutex
 
@@ -104,6 +104,7 @@ func (s *Store) GetUser(ctx context.Context, userID string) (*tenantkit.Identity
 		return nil, store.ErrNotFound
 	}
 	cp := *u
+	cp.Roles = append([]string(nil), u.Roles...)
 	return &cp, nil
 }
 
@@ -115,6 +116,7 @@ func (s *Store) GetUserByUsername(ctx context.Context, tenantID, username string
 		return nil, store.ErrNotFound
 	}
 	cp := *s.users[userID]
+	cp.Roles = append([]string(nil), s.users[userID].Roles...)
 	return &cp, nil
 }
 
@@ -129,6 +131,7 @@ func (s *Store) CreateUser(ctx context.Context, u *tenantkit.Identity) error {
 		return store.ErrAlreadyExists
 	}
 	cp := *u
+	cp.Roles = append([]string(nil), u.Roles...)
 	s.users[u.UserID] = &cp
 	s.usersByKey[key] = u.UserID
 	return nil
