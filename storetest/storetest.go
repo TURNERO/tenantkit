@@ -74,6 +74,27 @@ func TestTenantStore(t *testing.T, s store.TenantStore) {
 		}
 	})
 
+	t.Run("GetMutatingResultDoesNotCorruptStore", func(t *testing.T) {
+		id := "conformance-get-mutate"
+		if err := s.CreateTenant(ctx, &tenantkit.Tenant{ID: id, DisplayName: "Original Name", Active: true}); err != nil {
+			t.Fatalf("CreateTenant: %v", err)
+		}
+		got, err := s.GetTenant(ctx, id)
+		if err != nil {
+			t.Fatalf("GetTenant: %v", err)
+		}
+		got.DisplayName = "Mutated Name"
+		got.Active = false
+
+		again, err := s.GetTenant(ctx, id)
+		if err != nil {
+			t.Fatalf("GetTenant (second fetch): %v", err)
+		}
+		if again.DisplayName != "Original Name" || !again.Active {
+			t.Errorf("GetTenant = %+v after caller mutated a previous result, want DisplayName %q and Active %v (store's own copy was corrupted)", again, "Original Name", true)
+		}
+	})
+
 	t.Run("Deactivate", func(t *testing.T) {
 		id := "conformance-deactivate"
 		if err := s.CreateTenant(ctx, &tenantkit.Tenant{ID: id, DisplayName: "Deactivate Me", Active: true}); err != nil {
@@ -157,6 +178,25 @@ func TestUserStore(t *testing.T, s store.UserStore) {
 		err := s.CreateUser(ctx, &tenantkit.Identity{UserID: id, TenantID: "conformance-tenant", Username: "dupe-b"})
 		if !errors.Is(err, store.ErrAlreadyExists) {
 			t.Errorf("CreateUser duplicate UserID error = %v, want errors.Is(err, store.ErrAlreadyExists)", err)
+		}
+	})
+
+	t.Run("GetMutatingResultDoesNotCorruptStore", func(t *testing.T) {
+		if err := s.CreateUser(ctx, &tenantkit.Identity{UserID: "conformance-u4", TenantID: "conformance-tenant", Username: "dave", Roles: []string{"member"}}); err != nil {
+			t.Fatalf("CreateUser: %v", err)
+		}
+		got, err := s.GetUser(ctx, "conformance-u4")
+		if err != nil {
+			t.Fatalf("GetUser: %v", err)
+		}
+		got.Roles[0] = "admin"
+
+		again, err := s.GetUser(ctx, "conformance-u4")
+		if err != nil {
+			t.Fatalf("GetUser (second fetch): %v", err)
+		}
+		if again.Roles[0] != "member" {
+			t.Errorf("GetUser Roles[0] = %q after caller mutated a previous result, want %q (store's own copy was corrupted)", again.Roles[0], "member")
 		}
 	})
 }

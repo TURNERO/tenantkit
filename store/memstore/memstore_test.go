@@ -158,6 +158,28 @@ func TestStore_GetUserByUsername(t *testing.T) {
 	}
 }
 
+func TestStore_GetUserByUsername_MutatingResultDoesNotCorruptStore(t *testing.T) {
+	s := memstore.New()
+	ctx := context.Background()
+	if err := s.CreateUser(ctx, &tenantkit.Identity{UserID: "u1", TenantID: "acme", Username: "alice", Roles: []string{"member"}}); err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+
+	got, err := s.GetUserByUsername(ctx, "acme", "alice")
+	if err != nil {
+		t.Fatalf("GetUserByUsername: %v", err)
+	}
+	got.Roles[0] = "admin"
+
+	again, err := s.GetUserByUsername(ctx, "acme", "alice")
+	if err != nil {
+		t.Fatalf("GetUserByUsername (second fetch): %v", err)
+	}
+	if again.Roles[0] != "member" {
+		t.Errorf("GetUserByUsername Roles[0] = %q after caller mutated a previous result, want %q (store's own copy was corrupted)", again.Roles[0], "member")
+	}
+}
+
 func TestStore_GetUserByUsername_ScopedToTenant(t *testing.T) {
 	s := memstore.New()
 	ctx := context.Background()

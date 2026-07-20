@@ -50,6 +50,8 @@ func ValidTenantID(id string) bool {
 // there's a brief window where both are valid rather than a window
 // where neither is -- the safer direction to err in for a credential
 // rotation.
+//
+// Note: the existence check and the new key's creation are not atomic, so a concurrent caller could theoretically race between them.
 func RotateAPIKey(ctx context.Context, ks APIKeyStore, oldHash, tenantID, userID string) (string, error) {
 	if _, err := ks.GetAPIKeyByHash(ctx, oldHash); err != nil {
 		return "", fmt.Errorf("look up existing api key: %w", err)
