@@ -77,12 +77,16 @@ One Go module, `github.com/TURNERO/tenantkit`, split by responsibility:
   context.
 - **`tenantkit/grpcmw`** -- unary and stream gRPC interceptors doing the
   same job for gRPC services.
-- **`cmd/tenantkit-admin`** -- a reference admin CLI (create/list/deactivate
-  tenant, create/revoke API key, create user) that works purely against the
-  `store` interfaces. Meant to be forked/wrapped by consumers who need extra
-  provisioning steps outside tenantkit's scope (e.g. otel-ingestor's
-  ClickHouse RBAC + Kubernetes Secret steps), rather than used unmodified in
-  production as-is.
+- **`tenantkit/admin`** -- the operations behind the CLI (create/list/
+  deactivate tenant, create/revoke API key, create user), as a plain Go API
+  working purely against the `store` interfaces. Exists as its own package,
+  separate from `cmd/tenantkit-admin`, so a consumer with extra provisioning
+  steps outside tenantkit's scope can import these operations directly and
+  compose them with their own steps, rather than being limited to shelling
+  out to the binary.
+- **`cmd/tenantkit-admin`** -- a production-usable admin CLI, a thin wrapper
+  around `tenantkit/admin`. Supported for direct use, not just a reference
+  to fork. See "Management plane" below.
 
 ## Core types and interfaces
 
@@ -180,13 +184,33 @@ Row Policies) is the consumer's responsibility every time.
 
 ## Management plane
 
-tenantkit does not ship an opinionated admin HTTP API. `cmd/tenantkit-admin`
-is a reference CLI, built only against the `store` interfaces, intended as a
-starting point to fork or wrap -- not a drop-in production tool for every
-consumer. A consumer with extra provisioning needs (otel-ingestor's
-ClickHouse role/row-policy/Kubernetes-Secret steps) wraps or replaces it,
-calling tenantkit's store methods and helper functions for the generic parts
-instead of reimplementing key generation/hashing/validation.
+`cmd/tenantkit-admin` is a supported, production-usable CLI -- not merely a
+reference to fork. tenantkit still ships no opinionated admin *HTTP* API;
+the CLI is the supported management surface, and it stays store-agnostic
+since it's built entirely against the `store` interfaces (never a specific
+database driver).
+
+- **Subcommands**, noun-verb style: `tenantkit-admin tenant create|list|
+  deactivate`, `tenantkit-admin key create|revoke`, `tenantkit-admin user
+  create`. Scales cleanly as operations grow, matches the convention of
+  `git`/`gh`/`kubectl`.
+- **Destructive operations require confirmation** (`tenant deactivate`,
+  `key revoke`): an interactive `[y/N]` prompt by default, skippable with
+  `--yes`/`-f` so the same commands work unattended in scripts/CI.
+- **`--dry-run` on every mutating command**: prints what the operation
+  would do (which record(s) it would create/modify/deactivate) without
+  making the change, independent of the confirmation prompt -- lets an
+  operator preview an operation's effect before committing to it, the same
+  shape as `terraform plan`/`kubectl --dry-run`.
+- **`--json` on read/list commands** (`tenant list`, etc.): human-readable
+  text by default, structured JSON output behind the flag so the CLI can be
+  wrapped by other automation, matching `gh`/`kubectl` conventions.
+- All of the above is implemented once, in `tenantkit/admin`, and the CLI
+  is a thin flag-parsing/prompting/output-formatting layer on top -- so a
+  consumer with extra provisioning needs (e.g. a database-specific RBAC
+  step outside tenantkit's scope) can import `tenantkit/admin` directly and
+  compose its operations with their own, rather than being limited to
+  shelling out to the binary or forking it.
 
 ## Testing strategy
 
@@ -230,4 +254,6 @@ not bundled into tenantkit's own v1.
   otel-ingestor's existing `sessions` table pattern, but not settled here.
 - Whether `cmd/tenantkit-admin` ships as part of the main module or as a
   separate `tools/` submodule to avoid pulling CLI-only dependencies (flag
-  parsing, etc.) into every consumer's `go.mod`.
+  parsing, prompting, JSON output, etc.) into every consumer's `go.mod` --
+  still open now that the CLI is a supported production tool, not just a
+  reference (tracked as issue #2).
