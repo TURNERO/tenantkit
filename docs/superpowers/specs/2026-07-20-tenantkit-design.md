@@ -91,16 +91,34 @@ One Go module, `github.com/TURNERO/tenantkit`, split by responsibility:
 - **`tenantkit/grpcmw`** -- unary and stream gRPC interceptors doing the
   same job for gRPC services, sharing the same resolvers via the
   transport-agnostic `Source` interface.
+- **`tenantkit/store/sqlite`** -- an implementation of all four `store`
+  interfaces backed by SQLite (`modernc.org/sqlite`, pure Go, no cgo --
+  an embedded library reading/writing one file, no server process),
+  verified against `storetest` exactly like `memstore`. Unlike
+  `memstore`, this one is meant for real use: it's `cmd/tenantkit-admin`'s
+  default backend, and usable standalone by any consumer who wants a
+  persistent store without writing their own. Lives in the main module
+  (not `tools/`, see below) since Go only compiles what's actually
+  imported -- a consumer who never imports `store/sqlite` never pulls in
+  the SQLite driver, so keeping it in the main module costs nothing for
+  everyone else while making it importable without depending on `tools/`.
 - **`tenantkit/admin`** -- the operations behind the CLI (create/list/
-  deactivate tenant, create/revoke API key, create user), as a plain Go API
-  working purely against the `store` interfaces. Exists as its own package,
-  separate from `cmd/tenantkit-admin`, so a consumer with extra provisioning
-  steps outside tenantkit's scope can import these operations directly and
-  compose them with their own steps, rather than being limited to shelling
-  out to the binary.
-- **`cmd/tenantkit-admin`** -- a production-usable admin CLI, a thin wrapper
-  around `tenantkit/admin`. Supported for direct use, not just a reference
-  to fork. See "Management plane" below.
+  deactivate tenant, create/revoke/rotate API key, create user,
+  register/revoke client cert), as a plain Go API working purely against
+  the `store` interfaces. Exists as its own package, separate from
+  `cmd/tenantkit-admin`, so a consumer with extra provisioning steps
+  outside tenantkit's scope can import these operations directly and
+  compose them with their own steps, rather than being limited to
+  shelling out to the binary.
+- **`cmd/tenantkit-admin`** -- a production-usable admin CLI (built on
+  `spf13/cobra`, matching `kubectl`/`gh`'s own subcommand convention), a
+  thin wrapper around `tenantkit/admin` plus `store/sqlite` as its
+  default backend. Supported for direct use, not just a reference to
+  fork. Lives in a separate `tools/` Go submodule (its own `go.mod`,
+  depending on the main module) so its CLI-only dependencies (cobra,
+  prompting) stay out of the main module's dependency graph -- resolved
+  from the open question in a prior draft of this spec (issue #2). See
+  "Management plane" below.
 
 ## Core types and interfaces
 
@@ -217,7 +235,11 @@ The four built-in resolvers:
   not via `store.HashSecret` -- a cert fingerprint isn't a secret being
   hashed for storage, it's already a public identifier, so reusing that
   helper would be a semantic mismatch even though the underlying
-  operation is identical.
+  operation is identical. This computation is exported as
+  `resolve.CertFingerprint(cert *x509.Certificate) string` (the resolver
+  itself calls it too, one implementation) so `tenantkit/admin`'s
+  cert-registration operation can compute the same fingerprint an
+  incoming mTLS connection would produce, without duplicating the logic.
 - **Header** (`NewHeaderResolver(headerName string)`) reads a
   configurable header directly as the tenant ID via `Source.Header` --
   no store lookup at all. For trusted-proxy deployments where something
@@ -232,9 +254,12 @@ The four built-in resolvers:
 
 Pure helper functions (no interface, just functions any admin tool needs)
 live alongside `store`: generating a random high-entropy secret, hashing it
-(SHA-256) for storage, validating a tenant-key charset (`^[a-z0-9-]+$`), and
-rotating an API key (issue new + revoke old, in that order, so there's no
-window with zero valid keys... actually a brief window with two valid keys,
+(SHA-256) for storage, validating a tenant-key charset (`^[a-z0-9-]+$`),
+generating a tenant ID that already satisfies that charset
+(`GenerateTenantID`, lowercase hex -- `GenerateSecret`'s base64 output
+doesn't qualify, it can contain uppercase and underscores), and rotating
+an API key (issue new + revoke old, in that order, so there's no window
+with zero valid keys... actually a brief window with two valid keys,
 which is the safe direction to err in).
 
 ## Request flow (httpmw / grpcmw)
@@ -272,31 +297,53 @@ Row Policies) is the consumer's responsibility every time.
 
 `cmd/tenantkit-admin` is a supported, production-usable CLI -- not merely a
 reference to fork. tenantkit still ships no opinionated admin *HTTP* API;
-the CLI is the supported management surface, and it stays store-agnostic
-since it's built entirely against the `store` interfaces (never a specific
-database driver).
+the CLI is the supported management surface. Its business logic
+(`tenantkit/admin`) stays store-agnostic, built entirely against the
+`store` interfaces; the CLI binary itself uses `store/sqlite` as a
+concrete, persistent, zero-server-process default backend (see "Package
+layout" above), which is what makes it genuinely runnable out of the box
+rather than only usable by consumers who bring their own store.
 
-- **Subcommands**, noun-verb style: `tenantkit-admin tenant create|list|
-  deactivate`, `tenantkit-admin key create|revoke`, `tenantkit-admin user
-  create`. Scales cleanly as operations grow, matches the convention of
-  `git`/`gh`/`kubectl`.
+- **Subcommands**, noun-verb style, built on `spf13/cobra`:
+  - `tenant create --id <id> | --generate-id --name <name>`,
+    `tenant list [--json]`, `tenant deactivate --id <id>`
+  - `key create --tenant <id> [--user <id>]`, `key revoke --key <secret>`,
+    `key rotate --key <old-secret>`
+  - `user create (--user-id <id> | --generate-user-id) --tenant <id>
+    --username <name> [--roles a,b,c]`
+  - `cert register --cert-file <path> --tenant <id> [--user <id>]`,
+    `cert revoke --fingerprint <hex>`
+  
+  Every revoke/rotate operation is keyed by a string the operator already
+  has -- the plaintext secret they were shown once at creation, or the
+  fingerprint printed at registration (not a secret, safe to paste back)
+  -- rather than needing a `ListAPIKeys`/`ListClientCerts` capability
+  that doesn't exist on `APIKeyStore`/`ClientCertStore`. `tenantkit/admin`
+  hashes/fingerprints the input and calls the store, so the caller never
+  handles a hash directly. `key rotate` looks up the old key's own
+  `TenantID`/`UserID` first, so the operator doesn't have to repeat them.
+  Both ID-bearing create commands (`tenant create`, `user create`) accept
+  either an explicit ID or a `--generate-*` flag, matching each other.
 - **Destructive operations require confirmation** (`tenant deactivate`,
-  `key revoke`): an interactive `[y/N]` prompt by default, skippable with
-  `--yes`/`-f` so the same commands work unattended in scripts/CI.
+  `key revoke`, `cert revoke`): an interactive `[y/N]` prompt by default,
+  skippable with `--yes`/`-f` so the same commands work unattended in
+  scripts/CI.
 - **`--dry-run` on every mutating command**: prints what the operation
-  would do (which record(s) it would create/modify/deactivate) without
-  making the change, independent of the confirmation prompt -- lets an
-  operator preview an operation's effect before committing to it, the same
-  shape as `terraform plan`/`kubectl --dry-run`.
-- **`--json` on read/list commands** (`tenant list`, etc.): human-readable
-  text by default, structured JSON output behind the flag so the CLI can be
-  wrapped by other automation, matching `gh`/`kubectl` conventions.
+  would do (which record(s) it would create/modify/deactivate/revoke)
+  without making the change, independent of the confirmation prompt --
+  lets an operator preview an operation's effect before committing to it,
+  the same shape as `terraform plan`/`kubectl --dry-run`.
+- **`--json` on read/list commands** (`tenant list`, the only one in this
+  scope): human-readable text by default, structured JSON output behind
+  the flag so the CLI can be wrapped by other automation, matching
+  `gh`/`kubectl` conventions.
 - All of the above is implemented once, in `tenantkit/admin`, and the CLI
   is a thin flag-parsing/prompting/output-formatting layer on top -- so a
   consumer with extra provisioning needs (e.g. a database-specific RBAC
-  step outside tenantkit's scope) can import `tenantkit/admin` directly and
-  compose its operations with their own, rather than being limited to
-  shelling out to the binary or forking it.
+  step outside tenantkit's scope) can import `tenantkit/admin` directly
+  (against `store/sqlite`, or their own store implementation) and compose
+  its operations with their own, rather than being limited to shelling
+  out to the binary or forking it.
 
 ## Testing strategy
 
@@ -309,6 +356,11 @@ database driver).
   satisfies the documented contract (not-found errors, uniqueness, etc.).
   This is what otel-ingestor's SQLite-backed store would run to prove it's a
   valid `tenantkit.TenantStore`.
+- **`store/sqlite` tests**: run `storetest`'s conformance suite against a
+  real `modernc.org/sqlite` connection opened on `:memory:` (SQLite's
+  own in-process, non-persistent mode) -- no temp files, no
+  testcontainers, still zero network/Docker dependency, but exercising
+  real SQL rather than a map.
 - **`identity/oidc` tests**: run against a mocked/test OIDC provider (no
   network dependency), not a real Auth0/Okta account.
 - **Client-cert resolver tests**: use Go's `crypto/x509`/`crypto/tls` to
@@ -346,8 +398,10 @@ not bundled into tenantkit's own v1.
   This also blocks the session/identity-claim `TenantResolver` strategy
   (see `tenantkit/resolve`'s package layout entry), which is deferred to
   the Identity plan for the same reason (tracked as issue #1).
-- Whether `cmd/tenantkit-admin` ships as part of the main module or as a
-  separate `tools/` submodule to avoid pulling CLI-only dependencies (flag
-  parsing, prompting, JSON output, etc.) into every consumer's `go.mod` --
-  still open now that the CLI is a supported production tool, not just a
-  reference (tracked as issue #2).
+- ~~Whether `cmd/tenantkit-admin` ships as part of the main module or as a
+  separate `tools/` submodule~~ -- **resolved**: `tools/` submodule (see
+  "Package layout" above). `store/sqlite` stays in the main module, since
+  Go's per-package import compilation means a consumer who never imports
+  it never pulls in the SQLite driver either way -- the only thing a
+  separate module would have bought was keeping it out of the main
+  module's own `go.mod` bookkeeping, not out of anyone's build. (issue #2)
