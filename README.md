@@ -31,9 +31,9 @@ service.
 ## What it deliberately doesn't do
 
 - **No database access.** tenantkit defines storage interfaces
-  (`TenantStore`, `UserStore`, `APIKeyStore`); it never talks to a database
-  itself. You implement those interfaces against whatever you're already
-  using — SQL, NoSQL, or otherwise.
+  (`TenantStore`, `UserStore`, `APIKeyStore`, `ClientCertStore`); it never
+  talks to a database itself. You implement those interfaces against
+  whatever you're already using — SQL, NoSQL, or otherwise.
 - **No store-specific data isolation.** Row-level security, tenant-scoped
   query filters, and similar enforcement live in your own data layer, since
   they're inherently specific to whatever store you're using.
@@ -48,8 +48,15 @@ service.
 
 ## Status
 
-Early design stage — see `docs/superpowers/specs/` for the current design
-document. Not yet ready for production use.
+The foundation is implemented: core types, the four store interfaces, an
+in-memory reference store (`store/memstore`) for tests, an
+interface-conformance test suite (`storetest`) any store implementation can
+run against itself, and the API-key generation/hashing/rotation helpers.
+Tenant resolution and middleware (`resolve`, `httpmw`, `grpcmw`), identity
+(`identity/local`, `identity/oidc`), and the admin CLI are not yet built —
+see `docs/superpowers/specs/` for the full design and
+`docs/superpowers/plans/` for implementation status. Not yet ready for
+production use.
 
 ## License
 
