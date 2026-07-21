@@ -63,22 +63,34 @@ One Go module, `github.com/TURNERO/tenantkit`, split by responsibility:
   backend can run against its own implementation to prove it satisfies the
   documented interface behavior (not-found errors, uniqueness constraints,
   etc.).
-- **`tenantkit/identity`** -- the `IdentityProvider` interface.
-  - **`tenantkit/identity/local`** -- built-in implementation composing
-    `go-webauthn/webauthn` (passwordless) and/or `golang.org/x/crypto/bcrypt`
-    (password fallback) plus an opaque-token session store.
-  - **`tenantkit/identity/oidc`** -- built-in implementation wrapping any
-    external OIDC-compliant IdP via `github.com/coreos/go-oidc/v3` and
-    `golang.org/x/oauth2`.
-- **`tenantkit/resolve`** -- the `TenantResolver` interface plus built-in
-  strategies: API-key resolver, client-cert (mTLS) resolver,
-  session/identity-claim resolver, header resolver, subdomain resolver.
-  Composable as an explicitly ordered chain.
-- **`tenantkit/httpmw`** -- `net/http` middleware wiring a resolver chain +
-  an `IdentityProvider` + the store interfaces together, populating request
-  context.
+- **`tenantkit/identity`** -- the `IdentityProvider` interface only, in
+  this plan. `identity/local` and `identity/oidc` (concrete
+  implementations) are a separate future plan; this plan gives
+  `httpmw`/`grpcmw` something concrete to depend on without waiting on
+  those implementations.
+  - **`tenantkit/identity/local`** -- (future plan) built-in
+    implementation composing `go-webauthn/webauthn` (passwordless)
+    and/or `golang.org/x/crypto/bcrypt` (password fallback) plus an
+    opaque-token session store.
+  - **`tenantkit/identity/oidc`** -- (future plan) built-in
+    implementation wrapping any external OIDC-compliant IdP via
+    `github.com/coreos/go-oidc/v3` and `golang.org/x/oauth2`.
+- **`tenantkit/resolve`** -- the `Source` and `TenantResolver`
+  interfaces, plus four built-in strategies: API-key resolver,
+  client-cert (mTLS) resolver, header resolver, subdomain resolver.
+  Composable as an explicitly ordered chain. A fifth strategy --
+  session/identity-claim resolution -- is deferred to the Identity plan,
+  since it needs the session-token format decided there first (see
+  "Open questions").
+- **`tenantkit/httpmw`** -- `net/http` middleware wiring a resolver chain
+  + an optional `IdentityProvider` (nil skips identity resolution
+  entirely, for consumers with no human users) + the store interfaces
+  together, populating request context. A pluggable `ErrorHandler`
+  controls the response body on rejection; a plain-text default ships if
+  none is configured.
 - **`tenantkit/grpcmw`** -- unary and stream gRPC interceptors doing the
-  same job for gRPC services.
+  same job for gRPC services, sharing the same resolvers via the
+  transport-agnostic `Source` interface.
 - **`tenantkit/admin`** -- the operations behind the CLI (create/list/
   deactivate tenant, create/revoke API key, create user), as a plain Go API
   working purely against the `store` interfaces. Exists as its own package,
@@ -149,18 +161,28 @@ type ClientCertStore interface {
 ```
 
 ```go
-// tenantkit/identity
-type IdentityProvider interface {
-    Authenticate(ctx context.Context, r *http.Request) (*Identity, error)
+// tenantkit/resolve
+//
+// Source abstracts over the transport (HTTP or gRPC) so the same
+// TenantResolver/IdentityProvider implementations work against both --
+// httpmw wraps *http.Request, grpcmw wraps incoming metadata + peer info.
+type Source interface {
+    Header(key string) string
+    TLSPeerCertificates() []*x509.Certificate
+    Host() string
+}
+
+type TenantResolver interface {
+    // ok=false means "found no credential material of this kind" -- distinct
+    // from an error, which means "found something, but it's invalid."
+    ResolveTenant(ctx context.Context, src Source) (tenantID string, ok bool, err error)
 }
 ```
 
 ```go
-// tenantkit/resolve
-type TenantResolver interface {
-    // ok=false means "found no credential material of this kind" -- distinct
-    // from an error, which means "found something, but it's invalid."
-    ResolveTenant(ctx context.Context, r *http.Request) (tenantID string, ok bool, err error)
+// tenantkit/identity
+type IdentityProvider interface {
+    Authenticate(ctx context.Context, src resolve.Source) (*Identity, error)
 }
 ```
 
@@ -171,18 +193,42 @@ strategy. Falling through on bad credentials is a real vulnerability (e.g. a
 rejected API key silently retried as a spoofable header) -- only genuine
 absence of that credential type (`ok=false`) allows the chain to continue.
 
-The built-in client-cert resolver reads the already-verified peer
-certificate off the connection (`r.TLS.PeerCertificates` for HTTP, the
-gRPC peer's `credentials.TLSInfo` for gRPC) and looks up its fingerprint
-via `ClientCertStore` -- tenantkit only resolves identity from a cert
-that TLS has already verified against *some* CA pool; it never issues
-certs, runs a CA, or manages rotation. That's the consumer's
-infrastructure, same as it already owns TLS termination. This also means
-the resolver only works when the request actually reaches tenantkit's
-process over mTLS-terminated TLS -- if a load balancer or edge proxy
-terminates TLS before the app, `PeerCertificates` won't be populated
-there, and either the LB needs to forward cert details some other way or
-this resolver isn't usable for that deployment.
+The four built-in resolvers:
+
+- **API-key** (`NewAPIKeyResolver(store.APIKeyStore)`) reads
+  the standard bearer-token form of the `Authorization` header via `Source.Header`. No/non-bearer header
+  -- `ok=false`. A Bearer token present but not found (after hashing with
+  `store.HashSecret`, same as everywhere else API keys are compared) --
+  an error, not `ok=false`: the credential material was present, just
+  invalid.
+- **Client-cert** (`NewClientCertResolver(store.ClientCertStore)`) reads
+  the already-TLS-verified peer certificate off the connection via
+  `Source.TLSPeerCertificates()` and looks up its SHA-256 fingerprint via
+  `ClientCertStore` -- tenantkit only resolves identity from a cert that
+  TLS has already verified against *some* CA pool; it never issues
+  certs, runs a CA, or manages rotation. That's the consumer's
+  infrastructure, same as it already owns TLS termination. This also
+  means the resolver only works when the request actually reaches
+  tenantkit's process over mTLS-terminated TLS -- if a load balancer or
+  edge proxy terminates TLS before the app, no peer certificates will be
+  available there, and either the LB needs to forward cert details some
+  other way or this resolver isn't usable for that deployment. The
+  fingerprint is computed directly (SHA-256 of the DER-encoded cert),
+  not via `store.HashSecret` -- a cert fingerprint isn't a secret being
+  hashed for storage, it's already a public identifier, so reusing that
+  helper would be a semantic mismatch even though the underlying
+  operation is identical.
+- **Header** (`NewHeaderResolver(headerName string)`) reads a
+  configurable header directly as the tenant ID via `Source.Header` --
+  no store lookup at all. For trusted-proxy deployments where something
+  upstream (a gateway, a sidecar) already resolved the tenant and just
+  needs to pass it through. Tenant existence/active-checking still
+  happens downstream in `httpmw`/`grpcmw` via `TenantStore.GetTenant`
+  regardless of which resolver produced the ID, so this isn't a
+  vector for spoofing a nonexistent tenant into existing.
+- **Subdomain** (`NewSubdomainResolver()`) takes the first
+  dot-separated label of `Source.Host()` as the tenant ID. No dot in the
+  host (e.g. bare `localhost`) -- `ok=false`.
 
 Pure helper functions (no interface, just functions any admin tool needs)
 live alongside `store`: generating a random high-entropy secret, hashing it
@@ -196,15 +242,27 @@ which is the safe direction to err in).
 ```
 Request -> TenantResolver chain -> tenantID
         -> TenantStore.GetTenant(tenantID) -> reject if not found or !Active
-        -> IdentityProvider.Authenticate(r) -> *Identity (nil for pure API-key/service traffic)
+        -> if IdentityProvider configured: Authenticate(src) -> *Identity
+           (nil for pure API-key/service traffic even when configured;
+           this step is skipped entirely when IdentityProvider is nil)
         -> if Identity != nil: Identity.TenantID must equal resolved tenantID, else reject
         -> context populated: TenantFromContext(ctx), IdentityFromContext(ctx)
         -> next handler / interceptor
 ```
 
+`IdentityProvider` is optional per `httpmw`/`grpcmw` instance -- a
+consumer with no human users (e.g. an OTLP ingestor authenticating only
+service credentials) configures `nil` and skips this step entirely,
+rather than being forced to wire up an identity provider it will never
+use.
+
 Errors map to HTTP `401` (no/invalid credentials) vs `403` (valid
 credentials, wrong tenant or inactive tenant); gRPC interceptors map the
 same distinction to `codes.Unauthenticated` vs `codes.PermissionDenied`.
+The response body on rejection goes through a pluggable `ErrorHandler`
+(`func(w http.ResponseWriter, r *http.Request, status int, err error)`)
+so a consumer can return JSON or another format; `httpmw` ships a
+minimal plain-text default (`http.Error`-style) if none is configured.
 
 tenantkit never touches tenant-scoped *application* data. Scoping actual
 queries (`WHERE tenant_id = ?`, or store-specific mechanisms like ClickHouse
@@ -285,6 +343,9 @@ not bundled into tenantkit's own v1.
   signed JWT) -- affects whether session validation needs a store round-trip
   or can be done statelessly. Leaning opaque token + store lookup, matching
   otel-ingestor's existing `sessions` table pattern, but not settled here.
+  This also blocks the session/identity-claim `TenantResolver` strategy
+  (see `tenantkit/resolve`'s package layout entry), which is deferred to
+  the Identity plan for the same reason (tracked as issue #1).
 - Whether `cmd/tenantkit-admin` ships as part of the main module or as a
   separate `tools/` submodule to avoid pulling CLI-only dependencies (flag
   parsing, prompting, JSON output, etc.) into every consumer's `go.mod` --
