@@ -1112,6 +1112,14 @@ var _ resolve.Source = httpSource{}
 - [ ] **Step 5: Write `httpmw/httpmw.go`**
 
 ```go
+// Package httpmw provides net/http middleware that resolves the tenant
+// for each incoming request via resolve.TenantResolver, confirms it
+// exists and is active against a store.TenantStore, and optionally
+// authenticates the caller via an identity.IdentityProvider -- rejecting
+// the request with 401/403 on failure and otherwise attaching the
+// resolved tenant (and identity, if any) to the request context before
+// calling the next handler. It wraps *http.Request into a resolve.Source
+// via httpSource.
 package httpmw
 
 import (
@@ -1324,6 +1332,15 @@ func TestGRPCSource_HostFromAuthorityMetadata(t *testing.T) {
 	}
 }
 
+func TestGRPCSource_HostStripsPort(t *testing.T) {
+	ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs(":authority", "acme.example.com:443"))
+	src := grpcSource{ctx: ctx}
+
+	if got := src.Host(); got != "acme.example.com" {
+		t.Errorf("Host() = %q, want acme.example.com (port stripped)", got)
+	}
+}
+
 func TestGRPCSource_HostMissing(t *testing.T) {
 	src := grpcSource{ctx: context.Background()}
 	if got := src.Host(); got != "" {
@@ -1426,6 +1443,23 @@ func TestUnaryServerInterceptor_InvalidCredentialsRejectedWithUnauthenticated(t 
 	interceptor := grpcmw.UnaryServerInterceptor(grpcmw.Config{
 		Resolvers:   []resolve.TenantResolver{fakeResolver{ok: true, err: errors.New("bad key")}},
 		TenantStore: memstore.New(),
+	})
+
+	_, err := interceptor(context.Background(), "req", &grpc.UnaryServerInfo{}, func(ctx context.Context, req interface{}) (interface{}, error) {
+		t.Fatal("handler should not be called")
+		return nil, nil
+	})
+	if status.Code(err) != codes.Unauthenticated {
+		t.Errorf("status code = %v, want Unauthenticated", status.Code(err))
+	}
+}
+
+func TestUnaryServerInterceptor_IdentityAuthenticateErrorRejectedWithUnauthenticated(t *testing.T) {
+	ts := newTestTenantStore(t, "acme", true)
+	interceptor := grpcmw.UnaryServerInterceptor(grpcmw.Config{
+		Resolvers:        []resolve.TenantResolver{fakeResolver{tenantID: "acme", ok: true}},
+		TenantStore:      ts,
+		IdentityProvider: fakeIdentityProvider{err: errors.New("invalid token")},
 	})
 
 	_, err := interceptor(context.Background(), "req", &grpc.UnaryServerInfo{}, func(ctx context.Context, req interface{}) (interface{}, error) {
@@ -1550,6 +1584,7 @@ package grpcmw
 import (
 	"context"
 	"crypto/x509"
+	"net"
 
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/metadata"
@@ -1592,7 +1627,8 @@ func (s grpcSource) TLSPeerCertificates() []*x509.Certificate {
 // way); grpc-go's server-side API does not otherwise expose HTTP/2
 // pseudo-headers through the standard metadata package. Returns "" if
 // unavailable -- the subdomain resolver simply won't match, same as any
-// other resolver given no credential material.
+// other resolver given no credential material. Per the resolve.Source
+// contract, any port is stripped, mirroring httpSource.Host().
 func (s grpcSource) Host() string {
 	md, ok := metadata.FromIncomingContext(s.ctx)
 	if !ok {
@@ -1602,7 +1638,11 @@ func (s grpcSource) Host() string {
 	if len(vals) == 0 {
 		return ""
 	}
-	return vals[0]
+	host := vals[0]
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		return h
+	}
+	return host
 }
 
 var _ resolve.Source = grpcSource{}
@@ -1611,6 +1651,15 @@ var _ resolve.Source = grpcSource{}
 - [ ] **Step 5: Write `grpcmw/grpcmw.go`**
 
 ```go
+// Package grpcmw provides gRPC unary and stream server interceptors that
+// resolve the tenant for each incoming call via resolve.TenantResolver,
+// confirm it exists and is active against a store.TenantStore, and
+// optionally authenticate the caller via an identity.IdentityProvider --
+// rejecting the call with an Unauthenticated/PermissionDenied status on
+// failure and otherwise attaching the resolved tenant (and identity, if
+// any) to the call context before invoking the handler. It wraps the
+// gRPC server context into a resolve.Source via grpcSource; Config
+// mirrors httpmw.Config.
 package grpcmw
 
 import (
