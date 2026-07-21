@@ -231,6 +231,24 @@ func TestNew_IdentityProviderNilIdentityForServiceTraffic(t *testing.T) {
 	}
 }
 
+func TestNew_IdentityAuthenticateErrorRejectedWith401(t *testing.T) {
+	ts := newTestTenantStore(t, "acme", true)
+	handler := httpmw.New(httpmw.Config{
+		Resolvers:        []resolve.TenantResolver{fakeResolver{tenantID: "acme", ok: true}},
+		TenantStore:      ts,
+		IdentityProvider: fakeIdentityProvider{err: errors.New("invalid token")},
+	})(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("next handler should not be called")
+	}))
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401", rec.Code)
+	}
+}
+
 func TestNew_CustomErrorHandler(t *testing.T) {
 	called := false
 	handler := httpmw.New(httpmw.Config{
