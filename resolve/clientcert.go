@@ -2,8 +2,6 @@ package resolve
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 
 	"github.com/TURNERO/tenantkit/store"
@@ -25,8 +23,7 @@ func (r *clientCertResolver) ResolveTenant(ctx context.Context, src Source) (str
 	if len(certs) == 0 {
 		return "", false, nil
 	}
-	sum := sha256.Sum256(certs[0].Raw)
-	fingerprint := hex.EncodeToString(sum[:])
+	fingerprint := CertFingerprint(certs[0])
 
 	cert, err := r.cs.GetClientCertByFingerprint(ctx, fingerprint)
 	if err != nil {

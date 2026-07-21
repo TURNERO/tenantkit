@@ -117,3 +117,28 @@ func TestRotateAPIKey_OldHashNotFound(t *testing.T) {
 		t.Errorf("expected no key to exist for the failed rotation, got %+v", got)
 	}
 }
+
+
+func TestGenerateTenantID_SatisfiesValidTenantID(t *testing.T) {
+	id, err := store.GenerateTenantID()
+	if err != nil {
+		t.Fatalf("GenerateTenantID: %v", err)
+	}
+	if !store.ValidTenantID(id) {
+		t.Errorf("GenerateTenantID() = %q, not valid per ValidTenantID", id)
+	}
+}
+
+func TestGenerateTenantID_ReturnsUniqueValues(t *testing.T) {
+	a, err := store.GenerateTenantID()
+	if err != nil {
+		t.Fatalf("GenerateTenantID: %v", err)
+	}
+	b, err := store.GenerateTenantID()
+	if err != nil {
+		t.Fatalf("GenerateTenantID: %v", err)
+	}
+	if a == b {
+		t.Error("expected two calls to GenerateTenantID to return different values")
+	}
+}

@@ -42,6 +42,17 @@ func ValidTenantID(id string) bool {
 	return tenantIDPattern.MatchString(id)
 }
 
+// GenerateTenantID returns a new random tenant ID that already satisfies
+// ValidTenantID -- lowercase hex, unlike GenerateSecret's base64 output
+// (which can contain uppercase letters and underscores).
+func GenerateTenantID() (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("generate random tenant id: %w", err)
+	}
+	return hex.EncodeToString(b), nil
+}
+
 // RotateAPIKey replaces the API key identified by oldHash with a newly
 // generated one for the same tenant/user, returning the new plaintext
 // secret. It checks that oldHash exists before creating anything, so a
