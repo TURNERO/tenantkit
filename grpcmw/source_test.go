@@ -57,6 +57,15 @@ func TestGRPCSource_HostFromAuthorityMetadata(t *testing.T) {
 	}
 }
 
+func TestGRPCSource_HostStripsPort(t *testing.T) {
+	ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs(":authority", "acme.example.com:443"))
+	src := grpcSource{ctx: ctx}
+
+	if got := src.Host(); got != "acme.example.com" {
+		t.Errorf("Host() = %q, want acme.example.com (port stripped)", got)
+	}
+}
+
 func TestGRPCSource_HostMissing(t *testing.T) {
 	src := grpcSource{ctx: context.Background()}
 	if got := src.Host(); got != "" {

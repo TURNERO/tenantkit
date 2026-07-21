@@ -3,6 +3,7 @@ package grpcmw
 import (
 	"context"
 	"crypto/x509"
+	"net"
 
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/metadata"
@@ -45,7 +46,8 @@ func (s grpcSource) TLSPeerCertificates() []*x509.Certificate {
 // way); grpc-go's server-side API does not otherwise expose HTTP/2
 // pseudo-headers through the standard metadata package. Returns "" if
 // unavailable -- the subdomain resolver simply won't match, same as any
-// other resolver given no credential material.
+// other resolver given no credential material. Per the resolve.Source
+// contract, any port is stripped, mirroring httpSource.Host().
 func (s grpcSource) Host() string {
 	md, ok := metadata.FromIncomingContext(s.ctx)
 	if !ok {
@@ -55,7 +57,11 @@ func (s grpcSource) Host() string {
 	if len(vals) == 0 {
 		return ""
 	}
-	return vals[0]
+	host := vals[0]
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		return h
+	}
+	return host
 }
 
 var _ resolve.Source = grpcSource{}

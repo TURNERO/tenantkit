@@ -1,3 +1,11 @@
+// Package httpmw provides net/http middleware that resolves the tenant
+// for each incoming request via resolve.TenantResolver, confirms it
+// exists and is active against a store.TenantStore, and optionally
+// authenticates the caller via an identity.IdentityProvider -- rejecting
+// the request with 401/403 on failure and otherwise attaching the
+// resolved tenant (and identity, if any) to the request context before
+// calling the next handler. It wraps *http.Request into a resolve.Source
+// via httpSource.
 package httpmw
 
 import (

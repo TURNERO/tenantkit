@@ -1,3 +1,12 @@
+// Package grpcmw provides gRPC unary and stream server interceptors that
+// resolve the tenant for each incoming call via resolve.TenantResolver,
+// confirm it exists and is active against a store.TenantStore, and
+// optionally authenticate the caller via an identity.IdentityProvider --
+// rejecting the call with an Unauthenticated/PermissionDenied status on
+// failure and otherwise attaching the resolved tenant (and identity, if
+// any) to the call context before invoking the handler. It wraps the
+// gRPC server context into a resolve.Source via grpcSource; Config
+// mirrors httpmw.Config.
 package grpcmw
 
 import (

@@ -99,6 +99,23 @@ func TestUnaryServerInterceptor_InvalidCredentialsRejectedWithUnauthenticated(t 
 	}
 }
 
+func TestUnaryServerInterceptor_IdentityAuthenticateErrorRejectedWithUnauthenticated(t *testing.T) {
+	ts := newTestTenantStore(t, "acme", true)
+	interceptor := grpcmw.UnaryServerInterceptor(grpcmw.Config{
+		Resolvers:        []resolve.TenantResolver{fakeResolver{tenantID: "acme", ok: true}},
+		TenantStore:      ts,
+		IdentityProvider: fakeIdentityProvider{err: errors.New("invalid token")},
+	})
+
+	_, err := interceptor(context.Background(), "req", &grpc.UnaryServerInfo{}, func(ctx context.Context, req interface{}) (interface{}, error) {
+		t.Fatal("handler should not be called")
+		return nil, nil
+	})
+	if status.Code(err) != codes.Unauthenticated {
+		t.Errorf("status code = %v, want Unauthenticated", status.Code(err))
+	}
+}
+
 func TestUnaryServerInterceptor_InactiveTenantRejectedWithPermissionDenied(t *testing.T) {
 	ts := newTestTenantStore(t, "acme", false)
 	interceptor := grpcmw.UnaryServerInterceptor(grpcmw.Config{
