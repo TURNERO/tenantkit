@@ -2,10 +2,12 @@ package sqlite_test
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 
 	"github.com/TURNERO/tenantkit"
+	"github.com/TURNERO/tenantkit/store"
 	"github.com/TURNERO/tenantkit/store/sqlite"
 	"github.com/TURNERO/tenantkit/storetest"
 )
@@ -49,6 +51,48 @@ func TestSQLiteStore_UserRolesRoundTrip(t *testing.T) {
 	}
 	if len(got.Roles) != 2 || got.Roles[0] != "admin" || got.Roles[1] != "billing" {
 		t.Errorf("GetUser Roles = %v, want [admin billing]", got.Roles)
+	}
+}
+
+// TestSQLiteStore_DuplicateUsernameInTenantFails exercises the
+// SQLITE_CONSTRAINT_UNIQUE branch of isUniqueViolation specifically: it
+// uses two DIFFERENT UserIDs, so the users.PRIMARY KEY(user_id) never
+// fires, but the same TenantID/Username, so the composite
+// UNIQUE(tenant_id, username) constraint does. If isUniqueViolation's
+// SQLITE_CONSTRAINT_UNIQUE case were ever removed, the second CreateUser
+// call below would return a generic wrapped error instead of
+// store.ErrAlreadyExists, and this test would fail.
+func TestSQLiteStore_DuplicateUsernameInTenantFails(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	first := &tenantkit.Identity{UserID: "u1", TenantID: "acme", Username: "alice", Roles: []string{"admin"}}
+	if err := db.CreateUser(ctx, first); err != nil {
+		t.Fatalf("CreateUser(first): %v", err)
+	}
+	second := &tenantkit.Identity{UserID: "u2", TenantID: "acme", Username: "alice", Roles: []string{"billing"}}
+	err := db.CreateUser(ctx, second)
+	if !errors.Is(err, store.ErrAlreadyExists) {
+		t.Fatalf("CreateUser(second) error = %v, want errors.Is(err, store.ErrAlreadyExists)", err)
+	}
+}
+
+// TestSQLiteStore_UserWithNilRoles confirms an Identity with Roles == nil
+// round-trips through the json.Marshal/json.Unmarshal encoding
+// CreateUser/scanUser use to store Roles as a TEXT column, without
+// erroring or corrupting the value.
+func TestSQLiteStore_UserWithNilRoles(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	want := &tenantkit.Identity{UserID: "u1", TenantID: "acme", Username: "alice"}
+	if err := db.CreateUser(ctx, want); err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	got, err := db.GetUser(ctx, "u1")
+	if err != nil {
+		t.Fatalf("GetUser: %v", err)
+	}
+	if len(got.Roles) != 0 {
+		t.Errorf("GetUser Roles = %v, want empty", got.Roles)
 	}
 }
 
