@@ -118,7 +118,6 @@ func TestRotateAPIKey_OldHashNotFound(t *testing.T) {
 	}
 }
 
-
 func TestGenerateTenantID_SatisfiesValidTenantID(t *testing.T) {
 	id, err := store.GenerateTenantID()
 	if err != nil {

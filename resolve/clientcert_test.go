@@ -39,7 +39,6 @@ func generateTestCert(t *testing.T, commonName string) *x509.Certificate {
 	return cert
 }
 
-
 func TestClientCertResolver_ResolvesKnownCert(t *testing.T) {
 	cert := generateTestCert(t, "acme-writer")
 	cs := memstore.New()
