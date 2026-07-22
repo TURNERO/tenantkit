@@ -3,6 +3,7 @@ package local_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -112,5 +113,28 @@ func TestBeginWebAuthnLogin_UnknownUsername(t *testing.T) {
 	l, _ := newTestLocal(t)
 	if _, _, err := l.BeginWebAuthnLogin(ctx, "acme", "nobody"); err == nil {
 		t.Fatal("expected error for unknown username")
+	}
+}
+
+func TestFinishWebAuthnRegistration_TenantUserMismatch(t *testing.T) {
+	ctx := context.Background()
+	l, users := newTestLocal(t)
+
+	if err := users.CreateUser(ctx, &tenantkit.Identity{UserID: "u1", TenantID: "acme", Username: "alice"}); err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	if err := users.CreateUser(ctx, &tenantkit.Identity{UserID: "u2", TenantID: "acme", Username: "bob"}); err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+
+	_, regToken, err := l.BeginWebAuthnRegistration(ctx, "acme", "u1")
+	if err != nil {
+		t.Fatalf("BeginWebAuthnRegistration: %v", err)
+	}
+
+	// Finishing against a different userID than the ceremony was issued
+	// for must fail, even though the token itself is valid.
+	if err := l.FinishWebAuthnRegistration(ctx, "acme", "u2", regToken, jsonRequest("")); !errors.Is(err, local.ErrNotFound) {
+		t.Fatalf("got %v, want ErrNotFound", err)
 	}
 }
