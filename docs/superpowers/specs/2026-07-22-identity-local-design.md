@@ -165,11 +165,26 @@ type webauthnUser struct {
 	identity *tenantkit.Identity
 	creds    []webauthn.Credential
 }
-func (u *webauthnUser) WebAuthnID() []byte          { return []byte(u.identity.UserID) }
+func (u *webauthnUser) WebAuthnID() []byte {
+	sum := sha256.Sum256([]byte(u.identity.TenantID + ":" + u.identity.UserID))
+	return sum[:]
+}
 func (u *webauthnUser) WebAuthnName() string        { return u.identity.Username }
 func (u *webauthnUser) WebAuthnDisplayName() string { return u.identity.Username }
 func (u *webauthnUser) WebAuthnCredentials() []webauthn.Credential { return u.creds }
 ```
+
+`WebAuthnID` must be unique per Relying Party -- i.e. across the whole
+deployment, not just within a tenant. Bare `UserID` isn't safe for this:
+`UserStore`'s own uniqueness guarantee only spans `(tenantID, username)`,
+so two tenants could in principle produce the same `UserID` depending on
+how a consumer assigns them. A raw `tenantID + ":" + userID` string
+composite would fix the collision risk but not fit WebAuthn's 64-byte
+user-handle limit (tenantkit's default ID generators alone produce a
+32-char tenant ID + a 43-char user ID -- 76 bytes combined, before even
+counting a real username). Hashing the composite with SHA-256 gives a
+fixed 32-byte opaque handle that's both collision-resistant and safely
+under the limit regardless of how long a consumer's own IDs are.
 
 Registration adds a passkey to an already-known user -- not anonymous
 signup:
@@ -297,6 +312,6 @@ can't accidentally special-case "user doesn't exist" differently from
 
 None blocking. Deferred, tracked for follow-up plans:
 - Persistent (SQLite) implementation of `CredentialStore`/`SessionStore`/
-  `EphemeralStore`.
-- `identity/oidc`.
-- Account lockout / login rate-limiting.
+  `EphemeralStore`. (issue #4)
+- `identity/oidc`. (issue #5)
+- Account lockout / login rate-limiting. (issue #6)
