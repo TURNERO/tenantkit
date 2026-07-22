@@ -160,6 +160,11 @@ func TestTenantDeactivate_YesFlagSkipsPrompt(t *testing.T) {
 	if !strings.Contains(out, `deactivated tenant "acme"`) {
 		t.Errorf("output = %q, want confirmation of deactivation", out)
 	}
+
+	listOut, _ := execCmd(t, "", "tenant", "list", "--db", dbPath)
+	if !strings.Contains(listOut, "active=false") {
+		t.Errorf("list output = %q, want the tenant to be inactive", listOut)
+	}
 }
 
 func TestTenantDeactivate_NotFound(t *testing.T) {
