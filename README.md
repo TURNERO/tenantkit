@@ -41,22 +41,25 @@ service.
   strings; interpreting them is up to you. Pair tenantkit with a policy
   engine if you need one.
 - **No opinionated admin HTTP API.** Tenant/user/key provisioning is a
-  CLI (`cmd/tenantkit-admin`), production-usable on its own (subcommands,
+  CLI (`tools/cmd/tenantkit-admin`), production-usable on its own (subcommands,
   confirmation prompts, `--dry-run`, `--json` output) and backed by an
   importable operations package (`tenantkit/admin`) for consumers who
   need to compose provisioning with their own extra steps.
 
 ## Status
 
-The foundation is implemented: core types, the four store interfaces, an
-in-memory reference store (`store/memstore`) for tests, an
-interface-conformance test suite (`storetest`) any store implementation can
-run against itself, and the API-key generation/hashing/rotation helpers.
-Tenant resolution and middleware (`resolve`, `httpmw`, `grpcmw`), identity
-(`identity/local`, `identity/oidc`), and the admin CLI are not yet built —
-see `docs/superpowers/specs/` for the full design and
-`docs/superpowers/plans/` for implementation status. Not yet ready for
-production use.
+The foundation, tenant resolution and middleware, and admin tooling are
+implemented: core types, the four store interfaces, an in-memory reference
+store (`store/memstore`) and a persistent SQLite-backed store
+(`store/sqlite`), an interface-conformance test suite (`storetest`) any
+store implementation can run against itself, the API-key
+generation/hashing/rotation helpers, a pluggable `TenantResolver` chain
+(`resolve`) with `net/http` and gRPC middleware (`httpmw`, `grpcmw`), the
+provisioning operations package (`tenantkit/admin`), and the admin CLI
+(`tools/cmd/tenantkit-admin`). Identity (`identity/local`,
+`identity/oidc`) is not yet built — see `docs/superpowers/specs/` for the
+full design and `docs/superpowers/plans/` for implementation status. Not
+yet ready for production use.
 
 ## License
 
