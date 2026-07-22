@@ -391,13 +391,14 @@ not bundled into tenantkit's own v1.
 
 ## Open questions (flagged, not blocking)
 
-- Exact session-token format for `identity/local` (opaque random token vs.
-  signed JWT) -- affects whether session validation needs a store round-trip
-  or can be done statelessly. Leaning opaque token + store lookup, matching
-  otel-ingestor's existing `sessions` table pattern, but not settled here.
-  This also blocks the session/identity-claim `TenantResolver` strategy
-  (see `tenantkit/resolve`'s package layout entry), which is deferred to
-  the Identity plan for the same reason (tracked as issue #1).
+- ~~Exact session-token format for `identity/local` (opaque random token
+  vs. signed JWT)~~ -- **resolved**: opaque random token + store lookup,
+  matching otel-ingestor's existing `sessions` table pattern. Revocation
+  is a row delete; identity/local already does other store work per
+  request, so the round-trip cost of a lookup isn't a new cost the
+  stateless alternative would avoid. This unblocks the session/identity-
+  claim `TenantResolver` strategy (see `tenantkit/resolve`'s package
+  layout entry), deferred to the Identity plan. (issue #1)
 - ~~Whether `cmd/tenantkit-admin` ships as part of the main module or as a
   separate `tools/` submodule~~ -- **resolved**: `tools/` submodule (see
   "Package layout" above). `store/sqlite` stays in the main module, since
