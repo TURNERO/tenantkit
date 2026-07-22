@@ -6,6 +6,8 @@ package memstore
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"sync"
 	"time"
 
@@ -75,11 +77,32 @@ func (s *Store) GetPasswordHash(ctx context.Context, tenantID, userID string) (s
 	return hash, nil
 }
 
+// cloneCredential returns a deep copy of cred, including its nested byte
+// and slice fields (ID, PublicKey, Transport, Authenticator.AAGUID,
+// Attestation.*), via a JSON round-trip. webauthn.Credential is tagged
+// throughout for JSON, so this avoids hand-copying every nested field --
+// and missing one -- as the upstream struct evolves.
+func cloneCredential(cred webauthn.Credential) (webauthn.Credential, error) {
+	b, err := json.Marshal(cred)
+	if err != nil {
+		return webauthn.Credential{}, fmt.Errorf("marshal webauthn credential: %w", err)
+	}
+	var out webauthn.Credential
+	if err := json.Unmarshal(b, &out); err != nil {
+		return webauthn.Credential{}, fmt.Errorf("unmarshal webauthn credential: %w", err)
+	}
+	return out, nil
+}
+
 func (s *Store) AddWebAuthnCredential(ctx context.Context, tenantID, userID string, cred webauthn.Credential) error {
+	clone, err := cloneCredential(cred)
+	if err != nil {
+		return fmt.Errorf("clone webauthn credential: %w", err)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	key := credentialKey{tenantID, userID}
-	s.webauthnCreds[key] = append(s.webauthnCreds[key], cred)
+	s.webauthnCreds[key] = append(s.webauthnCreds[key], clone)
 	return nil
 }
 
@@ -88,7 +111,13 @@ func (s *Store) GetWebAuthnCredentials(ctx context.Context, tenantID, userID str
 	defer s.mu.Unlock()
 	creds := s.webauthnCreds[credentialKey{tenantID, userID}]
 	out := make([]webauthn.Credential, len(creds))
-	copy(out, creds)
+	for i, cred := range creds {
+		clone, err := cloneCredential(cred)
+		if err != nil {
+			return nil, fmt.Errorf("clone webauthn credential: %w", err)
+		}
+		out[i] = clone
+	}
 	return out, nil
 }
 

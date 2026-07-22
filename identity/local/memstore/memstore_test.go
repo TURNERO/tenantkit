@@ -77,14 +77,33 @@ func TestCredentialStore_WebAuthnCredentials(t *testing.T) {
 		t.Fatalf("got %d credentials, want 2", len(creds))
 	}
 
-	// Mutating the returned slice must not affect the store's copy.
-	creds[0].ID = []byte("mutated")
+	// Mutating a byte of the returned credential's ID in place must not
+	// affect the store's copy (guards against a shallow top-level-slice-only
+	// copy in GetWebAuthnCredentials).
+	creds[0].ID[0] = 'X'
 	fresh, err := s.GetWebAuthnCredentials(ctx, "acme", "u1")
 	if err != nil {
 		t.Fatalf("GetWebAuthnCredentials: %v", err)
 	}
 	if string(fresh[0].ID) != "cred-1" {
 		t.Fatalf("store's copy was mutated by caller: got %q", fresh[0].ID)
+	}
+
+	// Mutating a byte of the cred value passed into AddWebAuthnCredential,
+	// after the call returns, must not affect what's later retrieved
+	// (guards against AddWebAuthnCredential storing the caller's slice by
+	// reference instead of a deep copy).
+	cred3 := webauthn.Credential{ID: []byte("cred-3")}
+	if err := s.AddWebAuthnCredential(ctx, "acme", "u1", cred3); err != nil {
+		t.Fatalf("AddWebAuthnCredential: %v", err)
+	}
+	cred3.ID[0] = 'X'
+	fresh, err = s.GetWebAuthnCredentials(ctx, "acme", "u1")
+	if err != nil {
+		t.Fatalf("GetWebAuthnCredentials: %v", err)
+	}
+	if string(fresh[2].ID) != "cred-3" {
+		t.Fatalf("store's copy was mutated by caller's post-Add mutation: got %q", fresh[2].ID)
 	}
 }
 
