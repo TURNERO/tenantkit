@@ -28,6 +28,9 @@ func newRootCmd() *cobra.Command {
 	cmd.PersistentFlags().String("db", "tenantkit.db", "path to the SQLite database file (or :memory: for a throwaway one)")
 
 	cmd.AddCommand(newTenantCmd())
+	cmd.AddCommand(newKeyCmd())
+	cmd.AddCommand(newUserCmd())
+	cmd.AddCommand(newCertCmd())
 	return cmd
 }
 
