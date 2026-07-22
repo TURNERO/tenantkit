@@ -253,6 +253,16 @@ Parses the session cookie out of `src.Header("Cookie")`, looks it up via
 `Identity`. `resolve.Source` gains no new methods -- `Header("Cookie")`
 already covers this.
 
+Per `identity.IdentityProvider`'s contract ("nil for a request with no
+associated human identity"), an absent session credential is not an
+error: no `Cookie` header, a `Cookie` header without the session cookie,
+or one that fails to parse all return `(nil, nil)` -- `httpmw`/`grpcmw`
+treat any non-nil `Authenticate` error as a hard 401/Unauthenticated, so
+treating "no session offered" as an error would reject all API-key/mTLS
+and anonymous traffic on a mixed route. A session cookie that IS present
+but doesn't resolve to a valid, unexpired session is a genuine
+authentication failure and still returns a real error.
+
 Session token transport is a cookie, not a header: identity/local
 sessions are fundamentally a browser/human-login concept (WebAuthn is
 inherently a browser API), so a `Secure`/`HttpOnly` cookie set on login
