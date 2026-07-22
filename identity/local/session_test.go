@@ -28,8 +28,16 @@ func (s fakeSource) Host() string                             { return "" }
 func TestAuthenticate_NoCookie(t *testing.T) {
 	ctx := context.Background()
 	l, _ := newTestLocal(t)
-	if _, err := l.Authenticate(ctx, fakeSource{}); !errors.Is(err, local.ErrNotFound) {
-		t.Fatalf("got %v, want ErrNotFound", err)
+	// No session cookie offered at all -- per the IdentityProvider
+	// contract this is "no credential material of this kind", not an
+	// error: Authenticate must return (nil, nil) so callers degrade to
+	// anonymous rather than hard-rejecting the request.
+	ident, err := l.Authenticate(ctx, fakeSource{})
+	if err != nil {
+		t.Fatalf("got err %v, want nil", err)
+	}
+	if ident != nil {
+		t.Fatalf("got identity %+v, want nil", ident)
 	}
 }
 
@@ -130,8 +138,12 @@ func TestAuthenticate_MalformedCookieHeader(t *testing.T) {
 	// be treated the same as no session -- not a crash, not a different
 	// error type a caller would need to special-case.
 	src := fakeSource{headers: map[string]string{"Cookie": ";;;===not-a-cookie==="}}
-	if _, err := l.Authenticate(ctx, src); !errors.Is(err, local.ErrNotFound) {
-		t.Fatalf("got %v, want ErrNotFound", err)
+	ident, err := l.Authenticate(ctx, src)
+	if err != nil {
+		t.Fatalf("got err %v, want nil", err)
+	}
+	if ident != nil {
+		t.Fatalf("got identity %+v, want nil", ident)
 	}
 }
 

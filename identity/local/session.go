@@ -49,10 +49,20 @@ func ClearSessionCookie(w http.ResponseWriter) {
 // Authenticate satisfies identity.IdentityProvider. It reads the session
 // cookie from src, validates it via SessionStore, and returns the full
 // Identity via the UserStore Local was constructed with.
+//
+// Per the IdentityProvider contract, an absent session credential is not
+// an error: if src carries no tenantkit_session cookie at all (no Cookie
+// header, a Cookie header without that cookie, or one that can't be
+// parsed), Authenticate returns (nil, nil) so callers degrade to
+// anonymous rather than rejecting the request outright. A
+// tenantkit_session cookie that IS present but doesn't resolve to a
+// valid, unexpired session is a genuine authentication failure and still
+// returns a real error.
 func (l *Local) Authenticate(ctx context.Context, src resolve.Source) (*tenantkit.Identity, error) {
-	token, err := sessionTokenFromHeader(src.Header("Cookie"))
-	if err != nil {
-		return nil, err
+	token, ok := sessionTokenFromHeader(src.Header("Cookie"))
+	if !ok {
+		// No session credential offered at all -- not an error.
+		return nil, nil
 	}
 
 	sessionTenantID, userID, err := l.sessions.GetSession(ctx, token)
@@ -82,14 +92,19 @@ func (l *Local) Authenticate(ctx context.Context, src resolve.Source) (*tenantki
 	return ident, nil
 }
 
-func sessionTokenFromHeader(cookieHeader string) (string, error) {
+// sessionTokenFromHeader extracts the tenantkit_session cookie's value
+// from a raw Cookie header. ok is false whenever no such cookie value
+// can be extracted -- an empty header, a header without that cookie, or
+// one that fails to parse -- never an error: absence of a session
+// credential is not itself invalid input.
+func sessionTokenFromHeader(cookieHeader string) (token string, ok bool) {
 	if cookieHeader == "" {
-		return "", ErrNotFound
+		return "", false
 	}
 	req := &http.Request{Header: http.Header{"Cookie": []string{cookieHeader}}}
 	c, err := req.Cookie(SessionCookieName)
 	if err != nil {
-		return "", ErrNotFound
+		return "", false
 	}
-	return c.Value, nil
+	return c.Value, true
 }
