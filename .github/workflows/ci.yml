@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: gofmt check
+        run: |
+          fmt_out=$(gofmt -l .)
+          if [ -n "$fmt_out" ]; then
+            echo "The following files are not gofmt'd:"
+            echo "$fmt_out"
+            exit 1
+          fi
+
+      - name: Build (root module)
+        run: go build ./...
+
+      - name: Vet (root module)
+        run: go vet ./...
+
+      - name: Test (root module)
+        run: go test ./...
+
+      - name: Build (tools/ submodule)
+        working-directory: tools
+        run: go build ./...
+
+      - name: Vet (tools/ submodule)
+        working-directory: tools
+        run: go vet ./...
+
+      - name: Test (tools/ submodule)
+        working-directory: tools
+        run: go test ./...
