@@ -651,7 +651,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/TURNERO/tenantkit/identity"
 	"github.com/TURNERO/tenantkit/store"
 	"github.com/go-webauthn/webauthn/webauthn"
 )
@@ -684,8 +683,6 @@ type Local struct {
 	ephemeral EphemeralStore
 	wa        *webauthn.WebAuthn
 }
-
-var _ identity.IdentityProvider = (*Local)(nil)
 
 // New returns a Local identity provider. It returns an error if cfg is
 // invalid (e.g. missing RPID) -- see github.com/go-webauthn/webauthn's
@@ -1037,6 +1034,7 @@ import (
 	"net/http"
 
 	"github.com/TURNERO/tenantkit"
+	"github.com/TURNERO/tenantkit/identity"
 	"github.com/TURNERO/tenantkit/resolve"
 	"github.com/TURNERO/tenantkit/store"
 )
@@ -1046,6 +1044,9 @@ import (
 // name -- a consumer's login/logout HTTP handlers should use the helpers
 // below rather than hardcoding it, so the two sides can't drift.
 const SessionCookieName = "tenantkit_session"
+
+// Local satisfies identity.IdentityProvider via Authenticate below.
+var _ identity.IdentityProvider = (*Local)(nil)
 
 // SetSessionCookie sets token on w as Local's session cookie.
 func SetSessionCookie(w http.ResponseWriter, token string) {
