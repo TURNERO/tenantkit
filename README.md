@@ -48,16 +48,19 @@ service.
 
 ## Status
 
-The foundation, tenant resolution and middleware, and admin tooling are
-implemented: core types, the four store interfaces, an in-memory reference
-store (`store/memstore`) and a persistent SQLite-backed store
-(`store/sqlite`), an interface-conformance test suite (`storetest`) any
-store implementation can run against itself, the API-key
-generation/hashing/rotation helpers, a pluggable `TenantResolver` chain
-(`resolve`) with `net/http` and gRPC middleware (`httpmw`, `grpcmw`), the
-provisioning operations package (`tenantkit/admin`), and the admin CLI
-(`tools/cmd/tenantkit-admin`). Identity (`identity/local`,
-`identity/oidc`) is not yet built — see `docs/superpowers/specs/` for the
+The foundation, tenant resolution and middleware, admin tooling, and
+password/passkey identity are implemented: core types, the four store
+interfaces, an in-memory reference store (`store/memstore`) and a
+persistent SQLite-backed store (`store/sqlite`), an interface-conformance
+test suite (`storetest`) any store implementation can run against itself,
+the API-key generation/hashing/rotation helpers, a pluggable
+`TenantResolver` chain (`resolve`) with `net/http` and gRPC middleware
+(`httpmw`, `grpcmw`), the provisioning operations package
+(`tenantkit/admin`), the admin CLI (`tools/cmd/tenantkit-admin`), and
+`identity/local` — password (bcrypt) and WebAuthn (passkey)
+authentication, opaque-token sessions, and password reset, satisfying the
+`IdentityProvider` interface `httpmw`/`grpcmw` already consume.
+`identity/oidc` is not yet built — see `docs/superpowers/specs/` for the
 full design and `docs/superpowers/plans/` for implementation status. Not
 yet ready for production use.
 
