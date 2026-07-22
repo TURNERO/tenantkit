@@ -3,7 +3,9 @@ module github.com/TURNERO/tenantkit
 go 1.25.0
 
 require (
+	github.com/descope/virtualwebauthn v1.0.5
 	github.com/go-webauthn/webauthn v0.17.4
+	golang.org/x/crypto v0.54.0
 	google.golang.org/grpc v1.82.1
 	modernc.org/sqlite v1.54.0
 )
@@ -22,7 +24,6 @@ require (
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/tinylib/msgp v1.6.4 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
-	golang.org/x/crypto v0.54.0 // indirect
 	golang.org/x/net v0.56.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/text v0.40.0 // indirect
