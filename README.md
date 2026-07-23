@@ -31,9 +31,10 @@ service.
 ## What it deliberately doesn't do
 
 - **No database access.** tenantkit defines storage interfaces
-  (`TenantStore`, `UserStore`, `APIKeyStore`, `ClientCertStore`); it never
-  talks to a database itself. You implement those interfaces against
-  whatever you're already using — SQL, NoSQL, or otherwise.
+  (`TenantStore`, `UserStore`, `APIKeyStore`, `ClientCertStore`,
+  `OIDCProviderStore`); it never talks to a database itself. You
+  implement those interfaces against whatever you're already using —
+  SQL, NoSQL, or otherwise.
 - **No store-specific data isolation.** Row-level security, tenant-scoped
   query filters, and similar enforcement live in your own data layer, since
   they're inherently specific to whatever store you're using.
@@ -49,9 +50,11 @@ service.
 ## Status
 
 The foundation, tenant resolution and middleware, admin tooling, and
-password/passkey identity are implemented: core types, the four store
-interfaces, an in-memory reference store (`store/memstore`) and a
-persistent SQLite-backed store (`store/sqlite`), an interface-conformance
+password/passkey identity are implemented: core types, the five store
+interfaces (including per-tenant OIDC IdP registration via
+`OIDCProviderStore`), an in-memory reference store (`store/memstore`)
+and a persistent SQLite-backed store (`store/sqlite`), an
+interface-conformance
 test suite (`storetest`) any store implementation can run against itself,
 the API-key generation/hashing/rotation helpers, a pluggable
 `TenantResolver` chain (`resolve`) with `net/http` and gRPC middleware
