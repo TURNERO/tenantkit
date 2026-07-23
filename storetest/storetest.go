@@ -372,6 +372,29 @@ func TestOIDCProviderStore(t *testing.T, s store.OIDCProviderStore) {
 		}
 	})
 
+	t.Run("GetMutatingResultDoesNotCorruptStore", func(t *testing.T) {
+		p := newProvider("conformance-mutate-tenant", "okta", "conformance-mutate.example")
+		if err := s.CreateOIDCProvider(ctx, p); err != nil {
+			t.Fatalf("CreateOIDCProvider: %v", err)
+		}
+		got, err := s.GetOIDCProvider(ctx, "conformance-mutate-tenant", "okta")
+		if err != nil {
+			t.Fatalf("GetOIDCProvider: %v", err)
+		}
+		got.Domains[0] = "mutated.example"
+		got.Scopes[0] = "mutated-scope"
+
+		again, err := s.GetOIDCProvider(ctx, "conformance-mutate-tenant", "okta")
+		if err != nil {
+			t.Fatalf("GetOIDCProvider (second fetch): %v", err)
+		}
+		if again.Domains[0] != "conformance-mutate.example" {
+			t.Errorf("GetOIDCProvider Domains[0] = %q after caller mutated a previous result, want %q (store's own copy was corrupted)", again.Domains[0], "conformance-mutate.example")
+		}
+		if again.Scopes[0] != "openid" {
+			t.Errorf("GetOIDCProvider Scopes[0] = %q after caller mutated a previous result, want %q (store's own copy was corrupted)", again.Scopes[0], "openid")
+		}
+	})
 	t.Run("GetNotFound", func(t *testing.T) {
 		_, err := s.GetOIDCProvider(ctx, "conformance-acme", "conformance-does-not-exist")
 		if !errors.Is(err, store.ErrNotFound) {

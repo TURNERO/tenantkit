@@ -55,11 +55,11 @@ func New() *Store {
 }
 
 var (
-	_ store.TenantStore        = (*Store)(nil)
-	_ store.UserStore          = (*Store)(nil)
-	_ store.APIKeyStore        = (*Store)(nil)
-	_ store.ClientCertStore    = (*Store)(nil)
-	_ store.OIDCProviderStore  = (*Store)(nil)
+	_ store.TenantStore       = (*Store)(nil)
+	_ store.UserStore         = (*Store)(nil)
+	_ store.APIKeyStore       = (*Store)(nil)
+	_ store.ClientCertStore   = (*Store)(nil)
+	_ store.OIDCProviderStore = (*Store)(nil)
 )
 
 func (s *Store) GetTenant(ctx context.Context, tenantID string) (*tenantkit.Tenant, error) {
