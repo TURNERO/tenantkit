@@ -20,3 +20,7 @@ func openTestDB(t *testing.T) *sqlite.Store {
 func TestSQLiteConformsToCredentialStore(t *testing.T) {
 	storetest.TestCredentialStore(t, openTestDB(t))
 }
+
+func TestSQLiteConformsToSessionStore(t *testing.T) {
+	storetest.TestSessionStore(t, openTestDB(t))
+}

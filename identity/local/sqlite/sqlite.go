@@ -14,8 +14,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/TURNERO/tenantkit/identity/local"
+	"github.com/TURNERO/tenantkit/store"
 
 	"github.com/go-webauthn/webauthn/webauthn"
 	_ "modernc.org/sqlite"
@@ -149,4 +151,44 @@ func (s *Store) GetWebAuthnCredentials(ctx context.Context, tenantID, userID str
 		return nil, fmt.Errorf("get webauthn credentials: %w", err)
 	}
 	return out, nil
+}
+
+var _ local.SessionStore = (*Store)(nil)
+
+func (s *Store) CreateSession(ctx context.Context, tenantID, userID string, ttl time.Duration) (string, error) {
+	token, err := store.GenerateSecret()
+	if err != nil {
+		return "", err
+	}
+	expiresAt := time.Now().Add(ttl).Unix()
+	_, err = s.db.ExecContext(ctx, `INSERT INTO sessions (token, tenant_id, user_id, expires_at) VALUES (?, ?, ?, ?)`,
+		token, tenantID, userID, expiresAt)
+	if err != nil {
+		return "", fmt.Errorf("create session: %w", err)
+	}
+	return token, nil
+}
+
+func (s *Store) GetSession(ctx context.Context, token string) (string, string, error) {
+	var tenantID, userID string
+	var expiresAt int64
+	err := s.db.QueryRowContext(ctx, `SELECT tenant_id, user_id, expires_at FROM sessions WHERE token = ?`, token).
+		Scan(&tenantID, &userID, &expiresAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", "", local.ErrNotFound
+	}
+	if err != nil {
+		return "", "", fmt.Errorf("get session: %w", err)
+	}
+	if time.Now().Unix() > expiresAt {
+		return "", "", local.ErrExpired
+	}
+	return tenantID, userID, nil
+}
+
+func (s *Store) DeleteSession(ctx context.Context, token string) error {
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM sessions WHERE token = ?`, token); err != nil {
+		return fmt.Errorf("delete session: %w", err)
+	}
+	return nil
 }
