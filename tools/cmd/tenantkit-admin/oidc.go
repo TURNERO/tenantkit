@@ -31,6 +31,15 @@ func splitCommaList(raw string) []string {
 	return strings.Split(raw, ",")
 }
 
+// redactedOIDCProvider returns a shallow copy of p with ClientSecret
+// replaced by a fixed placeholder, for display commands that shouldn't
+// re-expose a live credential on every read.
+func redactedOIDCProvider(p *tenantkit.OIDCProvider) *tenantkit.OIDCProvider {
+	cp := *p
+	cp.ClientSecret = "(redacted)"
+	return &cp
+}
+
 // oidcProviderFlags holds the flags shared by "register" and "update"
 // (both take the same full set of provider fields).
 type oidcProviderFlags struct {
@@ -203,9 +212,13 @@ func newOIDCListCmd() *cobra.Command {
 
 			out := cmd.OutOrStdout()
 			if asJSON {
+				redacted := make([]*tenantkit.OIDCProvider, len(providers))
+				for i, p := range providers {
+					redacted[i] = redactedOIDCProvider(p)
+				}
 				enc := json.NewEncoder(out)
 				enc.SetIndent("", "  ")
-				return enc.Encode(providers)
+				return enc.Encode(redacted)
 			}
 			for _, p := range providers {
 				fmt.Fprintf(out, "%s\t%s\t%s\n", p.ProviderID, p.Name, p.IssuerURL)
@@ -220,8 +233,9 @@ func newOIDCListCmd() *cobra.Command {
 
 func newOIDCShowCmd() *cobra.Command {
 	var (
-		tenantID   string
-		providerID string
+		tenantID     string
+		providerID   string
+		revealSecret bool
 	)
 	cmd := &cobra.Command{
 		Use:   "show",
@@ -243,6 +257,9 @@ func newOIDCShowCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if !revealSecret {
+				p = redactedOIDCProvider(p)
+			}
 
 			enc := json.NewEncoder(cmd.OutOrStdout())
 			enc.SetIndent("", "  ")
@@ -251,6 +268,7 @@ func newOIDCShowCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&tenantID, "tenant", "", "tenant ID")
 	cmd.Flags().StringVar(&providerID, "provider-id", "", "provider ID")
+	cmd.Flags().BoolVar(&revealSecret, "reveal-secret", false, "print the real client secret instead of a redacted placeholder")
 	return cmd
 }
 

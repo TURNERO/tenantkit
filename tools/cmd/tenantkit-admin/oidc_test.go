@@ -31,6 +31,75 @@ func TestOIDCRegisterAndShow(t *testing.T) {
 	}
 }
 
+func TestOIDCShow_RedactsClientSecretByDefault(t *testing.T) {
+	dbPath := t.TempDir() + "/test.db"
+	if _, err := execCmd(t, "", "tenant", "create", "--db", dbPath, "--id", "acme", "--name", "Acme Corp"); err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	if _, err := execCmd(t, "", "oidc", "register", "--db", dbPath,
+		"--tenant", "acme", "--provider-id", "okta", "--name", "Acme Okta",
+		"--issuer", "https://acme.okta.com", "--client-id", "cid", "--client-secret", "supersecretvalue",
+		"--tenant-id-claim", "https://acme.example/tenant_id"); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	showOut, err := execCmd(t, "", "oidc", "show", "--db", dbPath, "--tenant", "acme", "--provider-id", "okta")
+	if err != nil {
+		t.Fatalf("execCmd: %v\noutput:\n%s", err, showOut)
+	}
+	if strings.Contains(showOut, "supersecretvalue") {
+		t.Errorf("show output = %q, must not contain the real client secret", showOut)
+	}
+	if !strings.Contains(showOut, "(redacted)") {
+		t.Errorf("show output = %q, want it to contain the redaction placeholder", showOut)
+	}
+}
+
+func TestOIDCShow_RevealSecretFlag(t *testing.T) {
+	dbPath := t.TempDir() + "/test.db"
+	if _, err := execCmd(t, "", "tenant", "create", "--db", dbPath, "--id", "acme", "--name", "Acme Corp"); err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	if _, err := execCmd(t, "", "oidc", "register", "--db", dbPath,
+		"--tenant", "acme", "--provider-id", "okta", "--name", "Acme Okta",
+		"--issuer", "https://acme.okta.com", "--client-id", "cid", "--client-secret", "supersecretvalue",
+		"--tenant-id-claim", "https://acme.example/tenant_id"); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	showOut, err := execCmd(t, "", "oidc", "show", "--db", dbPath, "--tenant", "acme", "--provider-id", "okta", "--reveal-secret")
+	if err != nil {
+		t.Fatalf("execCmd: %v\noutput:\n%s", err, showOut)
+	}
+	if !strings.Contains(showOut, "supersecretvalue") {
+		t.Errorf("show --reveal-secret output = %q, want it to contain the real client secret", showOut)
+	}
+}
+
+func TestOIDCListJSON_RedactsClientSecret(t *testing.T) {
+	dbPath := t.TempDir() + "/test.db"
+	if _, err := execCmd(t, "", "tenant", "create", "--db", dbPath, "--id", "acme", "--name", "Acme Corp"); err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	if _, err := execCmd(t, "", "oidc", "register", "--db", dbPath,
+		"--tenant", "acme", "--provider-id", "okta", "--name", "Acme Okta",
+		"--issuer", "https://acme.okta.com", "--client-id", "cid", "--client-secret", "supersecretvalue",
+		"--tenant-id-claim", "https://acme.example/tenant_id"); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	out, err := execCmd(t, "", "oidc", "list", "--db", dbPath, "--tenant", "acme", "--json")
+	if err != nil {
+		t.Fatalf("execCmd: %v\noutput:\n%s", err, out)
+	}
+	if strings.Contains(out, "supersecretvalue") {
+		t.Errorf("list --json output = %q, must not contain the real client secret", out)
+	}
+	if !strings.Contains(out, "(redacted)") {
+		t.Errorf("list --json output = %q, want it to contain the redaction placeholder", out)
+	}
+}
+
 func TestOIDCRegister_RequiresTenantIDClaim(t *testing.T) {
 	dbPath := t.TempDir() + "/test.db"
 	if _, err := execCmd(t, "", "tenant", "create", "--db", dbPath, "--id", "acme", "--name", "Acme Corp"); err != nil {
