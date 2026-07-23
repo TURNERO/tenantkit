@@ -192,3 +192,53 @@ func (s *Store) DeleteSession(ctx context.Context, token string) error {
 	}
 	return nil
 }
+
+var _ local.EphemeralStore = (*Store)(nil)
+
+func (s *Store) Put(ctx context.Context, token string, payload []byte, ttl time.Duration) error {
+	expiresAt := time.Now().Add(ttl).Unix()
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO ephemeral_tokens (token, payload, expires_at) VALUES (?, ?, ?)
+		ON CONFLICT (token) DO UPDATE SET payload = excluded.payload, expires_at = excluded.expires_at`,
+		token, payload, expiresAt)
+	if err != nil {
+		return fmt.Errorf("put ephemeral token: %w", err)
+	}
+	return nil
+}
+
+// Take fetches and deletes token's row in one transaction, so the
+// delete happens regardless of the outcome (found, expired, or not
+// found) -- concurrent Take calls for the same token can't both
+// succeed, matching local.EphemeralStore's single-use contract.
+func (s *Store) Take(ctx context.Context, token string) ([]byte, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("take ephemeral token: %w", err)
+	}
+	defer tx.Rollback()
+
+	var payload []byte
+	var expiresAt int64
+	err = tx.QueryRowContext(ctx, `SELECT payload, expires_at FROM ephemeral_tokens WHERE token = ?`, token).
+		Scan(&payload, &expiresAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, local.ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("take ephemeral token: %w", err)
+	}
+
+	if _, err := tx.ExecContext(ctx, `DELETE FROM ephemeral_tokens WHERE token = ?`, token); err != nil {
+		return nil, fmt.Errorf("take ephemeral token: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("take ephemeral token: %w", err)
+	}
+
+	if time.Now().Unix() > expiresAt {
+		return nil, local.ErrExpired
+	}
+	return payload, nil
+}
+

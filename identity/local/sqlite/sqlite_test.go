@@ -24,3 +24,8 @@ func TestSQLiteConformsToCredentialStore(t *testing.T) {
 func TestSQLiteConformsToSessionStore(t *testing.T) {
 	storetest.TestSessionStore(t, openTestDB(t))
 }
+
+func TestSQLiteConformsToEphemeralStore(t *testing.T) {
+	storetest.TestEphemeralStore(t, openTestDB(t))
+}
+
