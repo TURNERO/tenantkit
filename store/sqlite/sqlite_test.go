@@ -126,3 +126,7 @@ func TestOpen_MemoryDSN_SharedAcrossConnections(t *testing.T) {
 		t.Errorf("concurrent GetTenant failed (likely :memory: not shared across connections): %v", err)
 	}
 }
+
+func TestSQLiteConformsToOIDCProviderStore(t *testing.T) {
+	storetest.TestOIDCProviderStore(t, openTestDB(t))
+}

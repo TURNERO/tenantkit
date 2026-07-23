@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/TURNERO/tenantkit"
 	"github.com/TURNERO/tenantkit/admin"
 	"github.com/TURNERO/tenantkit/resolve"
 	"github.com/TURNERO/tenantkit/store"
@@ -277,5 +278,115 @@ func TestRevokeClientCert_UnknownFingerprint(t *testing.T) {
 	err := admin.RevokeClientCert(context.Background(), cs, "not-a-real-fingerprint")
 	if !errors.Is(err, store.ErrNotFound) {
 		t.Errorf("RevokeClientCert error = %v, want errors.Is(err, store.ErrNotFound)", err)
+	}
+}
+
+func testOIDCProvider(tenantID, providerID string) *tenantkit.OIDCProvider {
+	return &tenantkit.OIDCProvider{
+		TenantID:     tenantID,
+		ProviderID:   providerID,
+		Name:         "Acme Okta",
+		IssuerURL:    "https://acme.okta.com",
+		ClientID:     "client-1",
+		ClientSecret: "secret-1",
+		Scopes:       []string{"openid", "email"},
+		Domains:      []string{"acme.example"},
+		ClaimsMapping: tenantkit.ClaimsMapping{
+			TenantIDClaim: "https://acme.example/tenant_id",
+		},
+	}
+}
+
+func TestRegisterOIDCProvider(t *testing.T) {
+	s := memstore.New()
+	p := testOIDCProvider("acme", "okta")
+	if err := admin.RegisterOIDCProvider(context.Background(), s, p); err != nil {
+		t.Fatalf("RegisterOIDCProvider: %v", err)
+	}
+	got, err := s.GetOIDCProvider(context.Background(), "acme", "okta")
+	if err != nil {
+		t.Fatalf("GetOIDCProvider: %v", err)
+	}
+	if got.IssuerURL != p.IssuerURL {
+		t.Errorf("GetOIDCProvider = %+v, want IssuerURL %q", got, p.IssuerURL)
+	}
+}
+
+func TestRegisterOIDCProvider_MissingTenantIDClaim(t *testing.T) {
+	s := memstore.New()
+	p := testOIDCProvider("acme", "okta")
+	p.ClaimsMapping.TenantIDClaim = ""
+	if err := admin.RegisterOIDCProvider(context.Background(), s, p); err == nil {
+		t.Fatal("expected an error when ClaimsMapping.TenantIDClaim is empty")
+	}
+}
+
+func TestGetOIDCProvider(t *testing.T) {
+	s := memstore.New()
+	p := testOIDCProvider("acme", "okta")
+	if err := admin.RegisterOIDCProvider(context.Background(), s, p); err != nil {
+		t.Fatalf("RegisterOIDCProvider: %v", err)
+	}
+	got, err := admin.GetOIDCProvider(context.Background(), s, "acme", "okta")
+	if err != nil {
+		t.Fatalf("GetOIDCProvider: %v", err)
+	}
+	if got.ProviderID != "okta" {
+		t.Errorf("GetOIDCProvider = %+v, want ProviderID okta", got)
+	}
+}
+
+func TestListOIDCProviders(t *testing.T) {
+	s := memstore.New()
+	p1 := testOIDCProvider("acme", "okta")
+	p1.Domains = []string{"okta.example"}
+	if err := admin.RegisterOIDCProvider(context.Background(), s, p1); err != nil {
+		t.Fatalf("RegisterOIDCProvider: %v", err)
+	}
+	p2 := testOIDCProvider("acme", "google")
+	p2.Domains = []string{"google.example"}
+	if err := admin.RegisterOIDCProvider(context.Background(), s, p2); err != nil {
+		t.Fatalf("RegisterOIDCProvider: %v", err)
+	}
+	got, err := admin.ListOIDCProviders(context.Background(), s, "acme")
+	if err != nil {
+		t.Fatalf("ListOIDCProviders: %v", err)
+	}
+	if len(got) != 2 {
+		t.Errorf("ListOIDCProviders = %+v, want 2 entries", got)
+	}
+}
+
+func TestUpdateOIDCProvider(t *testing.T) {
+	s := memstore.New()
+	p := testOIDCProvider("acme", "okta")
+	if err := admin.RegisterOIDCProvider(context.Background(), s, p); err != nil {
+		t.Fatalf("RegisterOIDCProvider: %v", err)
+	}
+	p.Name = "Renamed"
+	if err := admin.UpdateOIDCProvider(context.Background(), s, p); err != nil {
+		t.Fatalf("UpdateOIDCProvider: %v", err)
+	}
+	got, err := s.GetOIDCProvider(context.Background(), "acme", "okta")
+	if err != nil {
+		t.Fatalf("GetOIDCProvider: %v", err)
+	}
+	if got.Name != "Renamed" {
+		t.Errorf("GetOIDCProvider.Name = %q, want %q", got.Name, "Renamed")
+	}
+}
+
+func TestRemoveOIDCProvider(t *testing.T) {
+	s := memstore.New()
+	p := testOIDCProvider("acme", "okta")
+	if err := admin.RegisterOIDCProvider(context.Background(), s, p); err != nil {
+		t.Fatalf("RegisterOIDCProvider: %v", err)
+	}
+	if err := admin.RemoveOIDCProvider(context.Background(), s, "acme", "okta"); err != nil {
+		t.Fatalf("RemoveOIDCProvider: %v", err)
+	}
+	_, err := s.GetOIDCProvider(context.Background(), "acme", "okta")
+	if !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("GetOIDCProvider after remove error = %v, want errors.Is(err, store.ErrNotFound)", err)
 	}
 }

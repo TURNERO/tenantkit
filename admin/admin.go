@@ -116,3 +116,55 @@ func RevokeClientCert(ctx context.Context, cs store.ClientCertStore, fingerprint
 	}
 	return nil
 }
+
+// RegisterOIDCProvider validates p.ClaimsMapping.TenantIDClaim is set
+// (the one field with no default -- without it, no token from this
+// provider could ever be mapped to a tenant), then creates the
+// registration.
+func RegisterOIDCProvider(ctx context.Context, s store.OIDCProviderStore, p *tenantkit.OIDCProvider) error {
+	if p.ClaimsMapping.TenantIDClaim == "" {
+		return fmt.Errorf("register oidc provider: claims mapping TenantIDClaim is required")
+	}
+	if err := s.CreateOIDCProvider(ctx, p); err != nil {
+		return fmt.Errorf("register oidc provider: %w", err)
+	}
+	return nil
+}
+
+// GetOIDCProvider returns the tenant's provider with the given ID.
+func GetOIDCProvider(ctx context.Context, s store.OIDCProviderStore, tenantID, providerID string) (*tenantkit.OIDCProvider, error) {
+	p, err := s.GetOIDCProvider(ctx, tenantID, providerID)
+	if err != nil {
+		return nil, fmt.Errorf("get oidc provider: %w", err)
+	}
+	return p, nil
+}
+
+// ListOIDCProviders returns every provider registered for tenantID.
+func ListOIDCProviders(ctx context.Context, s store.OIDCProviderStore, tenantID string) ([]*tenantkit.OIDCProvider, error) {
+	providers, err := s.ListOIDCProviders(ctx, tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("list oidc providers: %w", err)
+	}
+	return providers, nil
+}
+
+// UpdateOIDCProvider validates p.ClaimsMapping.TenantIDClaim is set (see
+// RegisterOIDCProvider), then replaces the stored registration.
+func UpdateOIDCProvider(ctx context.Context, s store.OIDCProviderStore, p *tenantkit.OIDCProvider) error {
+	if p.ClaimsMapping.TenantIDClaim == "" {
+		return fmt.Errorf("update oidc provider: claims mapping TenantIDClaim is required")
+	}
+	if err := s.UpdateOIDCProvider(ctx, p); err != nil {
+		return fmt.Errorf("update oidc provider: %w", err)
+	}
+	return nil
+}
+
+// RemoveOIDCProvider removes the tenant's provider with the given ID.
+func RemoveOIDCProvider(ctx context.Context, s store.OIDCProviderStore, tenantID, providerID string) error {
+	if err := s.DeleteOIDCProvider(ctx, tenantID, providerID); err != nil {
+		return fmt.Errorf("remove oidc provider: %w", err)
+	}
+	return nil
+}

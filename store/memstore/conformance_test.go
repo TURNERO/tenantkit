@@ -22,3 +22,7 @@ func TestMemstoreConformsToAPIKeyStore(t *testing.T) {
 func TestMemstoreConformsToClientCertStore(t *testing.T) {
 	storetest.TestClientCertStore(t, memstore.New())
 }
+
+func TestMemstoreConformsToOIDCProviderStore(t *testing.T) {
+	storetest.TestOIDCProviderStore(t, memstore.New())
+}

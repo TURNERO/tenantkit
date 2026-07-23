@@ -79,3 +79,38 @@ type ClientCertStore interface {
 	// returns ErrNotFound if it doesn't exist.
 	RevokeClientCert(ctx context.Context, fingerprint string) error
 }
+
+// ErrDomainTaken is returned by CreateOIDCProvider/UpdateOIDCProvider
+// when one of the given Domains is already claimed by a different
+// tenant/provider. Distinct from ErrAlreadyExists, which means the
+// (tenant_id, provider_id) pair itself already exists.
+var ErrDomainTaken = errors.New("tenantkit/store: domain already claimed by another provider")
+
+// OIDCProviderStore stores and retrieves per-tenant OIDC IdP
+// registrations. A tenant may register more than one provider (distinct
+// ProviderIDs); Domains must be globally unique across every tenant and
+// provider.
+type OIDCProviderStore interface {
+	// GetOIDCProvider returns the tenant's provider with the given ID,
+	// or ErrNotFound.
+	GetOIDCProvider(ctx context.Context, tenantID, providerID string) (*tenantkit.OIDCProvider, error)
+	// GetOIDCProviderByDomain returns the provider that claims domain,
+	// or ErrNotFound if no provider claims it.
+	GetOIDCProviderByDomain(ctx context.Context, domain string) (*tenantkit.OIDCProvider, error)
+	// ListOIDCProviders returns all providers registered for tenantID,
+	// or an empty slice (not an error) if none are.
+	ListOIDCProviders(ctx context.Context, tenantID string) ([]*tenantkit.OIDCProvider, error)
+	// CreateOIDCProvider inserts p, or returns ErrAlreadyExists if
+	// (p.TenantID, p.ProviderID) already exists, or ErrDomainTaken if
+	// any of p.Domains is already claimed elsewhere.
+	CreateOIDCProvider(ctx context.Context, p *tenantkit.OIDCProvider) error
+	// UpdateOIDCProvider replaces the stored record for (p.TenantID,
+	// p.ProviderID) with p, or returns ErrNotFound if it doesn't exist,
+	// or ErrDomainTaken if any of p.Domains is now claimed by a
+	// different tenant/provider.
+	UpdateOIDCProvider(ctx context.Context, p *tenantkit.OIDCProvider) error
+	// DeleteOIDCProvider removes the tenant's provider with the given
+	// ID (and frees its claimed domains), or returns ErrNotFound if it
+	// doesn't exist.
+	DeleteOIDCProvider(ctx context.Context, tenantID, providerID string) error
+}

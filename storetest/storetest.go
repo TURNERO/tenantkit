@@ -9,6 +9,7 @@ package storetest
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 
 	"github.com/TURNERO/tenantkit"
@@ -317,6 +318,240 @@ func TestClientCertStore(t *testing.T, s store.ClientCertStore) {
 		err := s.RevokeClientCert(ctx, "conformance-does-not-exist-2")
 		if !errors.Is(err, store.ErrNotFound) {
 			t.Errorf("RevokeClientCert error = %v, want errors.Is(err, store.ErrNotFound)", err)
+		}
+	})
+}
+
+// TestOIDCProviderStore runs a battery of subtests against s. Pass a
+// fresh, empty store -- these subtests create providers and do not
+// clean up after themselves.
+func TestOIDCProviderStore(t *testing.T, s store.OIDCProviderStore) {
+	t.Helper()
+	ctx := context.Background()
+
+	newProvider := func(tenantID, providerID string, domains ...string) *tenantkit.OIDCProvider {
+		return &tenantkit.OIDCProvider{
+			TenantID:     tenantID,
+			ProviderID:   providerID,
+			Name:         "Test Provider",
+			IssuerURL:    "https://idp.example/" + tenantID + "/" + providerID,
+			ClientID:     "client-" + providerID,
+			ClientSecret: "secret-" + providerID,
+			Scopes:       []string{"openid", "email"},
+			Domains:      domains,
+			ClaimsMapping: tenantkit.ClaimsMapping{
+				TenantIDClaim: "https://example/tenant_id",
+				UserIDClaim:   "sub",
+				UsernameClaim: "email",
+				RolesClaim:    "roles",
+			},
+		}
+	}
+
+	t.Run("CreateAndGet", func(t *testing.T) {
+		want := newProvider("conformance-acme", "okta", "conformance-acme-okta.example")
+		if err := s.CreateOIDCProvider(ctx, want); err != nil {
+			t.Fatalf("CreateOIDCProvider: %v", err)
+		}
+		got, err := s.GetOIDCProvider(ctx, "conformance-acme", "okta")
+		if err != nil {
+			t.Fatalf("GetOIDCProvider: %v", err)
+		}
+		if got.TenantID != want.TenantID || got.ProviderID != want.ProviderID || got.Name != want.Name ||
+			got.IssuerURL != want.IssuerURL || got.ClientID != want.ClientID || got.ClientSecret != want.ClientSecret {
+			t.Errorf("GetOIDCProvider = %+v, want %+v", got, want)
+		}
+		if !slices.Equal(got.Scopes, want.Scopes) {
+			t.Errorf("GetOIDCProvider Scopes = %v, want %v", got.Scopes, want.Scopes)
+		}
+		if !slices.Equal(got.Domains, want.Domains) {
+			t.Errorf("GetOIDCProvider Domains = %v, want %v", got.Domains, want.Domains)
+		}
+		if got.ClaimsMapping != want.ClaimsMapping {
+			t.Errorf("GetOIDCProvider ClaimsMapping = %+v, want %+v", got.ClaimsMapping, want.ClaimsMapping)
+		}
+	})
+
+	t.Run("GetMutatingResultDoesNotCorruptStore", func(t *testing.T) {
+		p := newProvider("conformance-mutate-tenant", "okta", "conformance-mutate.example")
+		if err := s.CreateOIDCProvider(ctx, p); err != nil {
+			t.Fatalf("CreateOIDCProvider: %v", err)
+		}
+		got, err := s.GetOIDCProvider(ctx, "conformance-mutate-tenant", "okta")
+		if err != nil {
+			t.Fatalf("GetOIDCProvider: %v", err)
+		}
+		got.Domains[0] = "mutated.example"
+		got.Scopes[0] = "mutated-scope"
+
+		again, err := s.GetOIDCProvider(ctx, "conformance-mutate-tenant", "okta")
+		if err != nil {
+			t.Fatalf("GetOIDCProvider (second fetch): %v", err)
+		}
+		if again.Domains[0] != "conformance-mutate.example" {
+			t.Errorf("GetOIDCProvider Domains[0] = %q after caller mutated a previous result, want %q (store's own copy was corrupted)", again.Domains[0], "conformance-mutate.example")
+		}
+		if again.Scopes[0] != "openid" {
+			t.Errorf("GetOIDCProvider Scopes[0] = %q after caller mutated a previous result, want %q (store's own copy was corrupted)", again.Scopes[0], "openid")
+		}
+	})
+	t.Run("GetNotFound", func(t *testing.T) {
+		_, err := s.GetOIDCProvider(ctx, "conformance-acme", "conformance-does-not-exist")
+		if !errors.Is(err, store.ErrNotFound) {
+			t.Errorf("GetOIDCProvider error = %v, want errors.Is(err, store.ErrNotFound)", err)
+		}
+	})
+
+	t.Run("GetByDomain", func(t *testing.T) {
+		p := newProvider("conformance-globex", "google", "conformance-globex-google.example")
+		if err := s.CreateOIDCProvider(ctx, p); err != nil {
+			t.Fatalf("CreateOIDCProvider: %v", err)
+		}
+		got, err := s.GetOIDCProviderByDomain(ctx, "conformance-globex-google.example")
+		if err != nil {
+			t.Fatalf("GetOIDCProviderByDomain: %v", err)
+		}
+		if got.TenantID != "conformance-globex" || got.ProviderID != "google" {
+			t.Errorf("GetOIDCProviderByDomain = %+v, want tenant conformance-globex provider google", got)
+		}
+	})
+
+	t.Run("GetByDomainNotFound", func(t *testing.T) {
+		_, err := s.GetOIDCProviderByDomain(ctx, "conformance-unclaimed.example")
+		if !errors.Is(err, store.ErrNotFound) {
+			t.Errorf("GetOIDCProviderByDomain error = %v, want errors.Is(err, store.ErrNotFound)", err)
+		}
+	})
+
+	t.Run("ListEmpty", func(t *testing.T) {
+		got, err := s.ListOIDCProviders(ctx, "conformance-no-providers-tenant")
+		if err != nil {
+			t.Fatalf("ListOIDCProviders: %v", err)
+		}
+		if len(got) != 0 {
+			t.Errorf("ListOIDCProviders = %+v, want empty", got)
+		}
+	})
+
+	t.Run("ListIncludesCreated", func(t *testing.T) {
+		if err := s.CreateOIDCProvider(ctx, newProvider("conformance-multi", "okta")); err != nil {
+			t.Fatalf("CreateOIDCProvider: %v", err)
+		}
+		if err := s.CreateOIDCProvider(ctx, newProvider("conformance-multi", "google")); err != nil {
+			t.Fatalf("CreateOIDCProvider: %v", err)
+		}
+		got, err := s.ListOIDCProviders(ctx, "conformance-multi")
+		if err != nil {
+			t.Fatalf("ListOIDCProviders: %v", err)
+		}
+		if len(got) != 2 {
+			t.Fatalf("ListOIDCProviders = %+v, want 2 entries", got)
+		}
+	})
+
+	t.Run("CreateDuplicateProviderIDFails", func(t *testing.T) {
+		p := newProvider("conformance-dupe-tenant", "okta")
+		if err := s.CreateOIDCProvider(ctx, p); err != nil {
+			t.Fatalf("first CreateOIDCProvider: %v", err)
+		}
+		err := s.CreateOIDCProvider(ctx, newProvider("conformance-dupe-tenant", "okta"))
+		if !errors.Is(err, store.ErrAlreadyExists) {
+			t.Errorf("CreateOIDCProvider duplicate error = %v, want errors.Is(err, store.ErrAlreadyExists)", err)
+		}
+	})
+
+	t.Run("CreateDomainTakenFails", func(t *testing.T) {
+		if err := s.CreateOIDCProvider(ctx, newProvider("conformance-domain-a", "okta", "conformance-shared.example")); err != nil {
+			t.Fatalf("first CreateOIDCProvider: %v", err)
+		}
+		err := s.CreateOIDCProvider(ctx, newProvider("conformance-domain-b", "okta", "conformance-shared.example"))
+		if !errors.Is(err, store.ErrDomainTaken) {
+			t.Errorf("CreateOIDCProvider domain-taken error = %v, want errors.Is(err, store.ErrDomainTaken)", err)
+		}
+	})
+
+	t.Run("Update", func(t *testing.T) {
+		p := newProvider("conformance-update-tenant", "okta", "conformance-update-old.example")
+		if err := s.CreateOIDCProvider(ctx, p); err != nil {
+			t.Fatalf("CreateOIDCProvider: %v", err)
+		}
+		p.Name = "Updated Name"
+		p.Domains = []string{"conformance-update-new.example"}
+		if err := s.UpdateOIDCProvider(ctx, p); err != nil {
+			t.Fatalf("UpdateOIDCProvider: %v", err)
+		}
+		got, err := s.GetOIDCProvider(ctx, "conformance-update-tenant", "okta")
+		if err != nil {
+			t.Fatalf("GetOIDCProvider: %v", err)
+		}
+		if got.Name != "Updated Name" || !slices.Equal(got.Domains, []string{"conformance-update-new.example"}) {
+			t.Errorf("GetOIDCProvider after update = %+v, want Name %q Domains %v", got, "Updated Name", []string{"conformance-update-new.example"})
+		}
+		// The old domain must be freed.
+		_, err = s.GetOIDCProviderByDomain(ctx, "conformance-update-old.example")
+		if !errors.Is(err, store.ErrNotFound) {
+			t.Errorf("GetOIDCProviderByDomain for freed domain error = %v, want errors.Is(err, store.ErrNotFound)", err)
+		}
+	})
+
+	t.Run("UpdateNotFound", func(t *testing.T) {
+		err := s.UpdateOIDCProvider(ctx, newProvider("conformance-update-missing", "okta"))
+		if !errors.Is(err, store.ErrNotFound) {
+			t.Errorf("UpdateOIDCProvider error = %v, want errors.Is(err, store.ErrNotFound)", err)
+		}
+	})
+
+	t.Run("UpdateDomainTakenFails", func(t *testing.T) {
+		if err := s.CreateOIDCProvider(ctx, newProvider("conformance-ud-a", "okta", "conformance-ud-taken.example")); err != nil {
+			t.Fatalf("CreateOIDCProvider: %v", err)
+		}
+		p := newProvider("conformance-ud-b", "okta")
+		if err := s.CreateOIDCProvider(ctx, p); err != nil {
+			t.Fatalf("CreateOIDCProvider: %v", err)
+		}
+		p.Domains = []string{"conformance-ud-taken.example"}
+		err := s.UpdateOIDCProvider(ctx, p)
+		if !errors.Is(err, store.ErrDomainTaken) {
+			t.Errorf("UpdateOIDCProvider domain-taken error = %v, want errors.Is(err, store.ErrDomainTaken)", err)
+		}
+	})
+
+	t.Run("Delete", func(t *testing.T) {
+		p := newProvider("conformance-delete-tenant", "okta", "conformance-delete.example")
+		if err := s.CreateOIDCProvider(ctx, p); err != nil {
+			t.Fatalf("CreateOIDCProvider: %v", err)
+		}
+		if err := s.DeleteOIDCProvider(ctx, "conformance-delete-tenant", "okta"); err != nil {
+			t.Fatalf("DeleteOIDCProvider: %v", err)
+		}
+		_, err := s.GetOIDCProvider(ctx, "conformance-delete-tenant", "okta")
+		if !errors.Is(err, store.ErrNotFound) {
+			t.Errorf("GetOIDCProvider after delete error = %v, want errors.Is(err, store.ErrNotFound)", err)
+		}
+		_, err = s.GetOIDCProviderByDomain(ctx, "conformance-delete.example")
+		if !errors.Is(err, store.ErrNotFound) {
+			t.Errorf("GetOIDCProviderByDomain after delete error = %v, want errors.Is(err, store.ErrNotFound)", err)
+		}
+		// The freed domain must be claimable again.
+		if err := s.CreateOIDCProvider(ctx, newProvider("conformance-delete-tenant-2", "google", "conformance-delete.example")); err != nil {
+			t.Errorf("CreateOIDCProvider re-claiming freed domain: %v", err)
+		}
+	})
+
+	t.Run("DeleteNotFound", func(t *testing.T) {
+		err := s.DeleteOIDCProvider(ctx, "conformance-delete-missing", "okta")
+		if !errors.Is(err, store.ErrNotFound) {
+			t.Errorf("DeleteOIDCProvider error = %v, want errors.Is(err, store.ErrNotFound)", err)
+		}
+	})
+
+	t.Run("TenantIsolation", func(t *testing.T) {
+		if err := s.CreateOIDCProvider(ctx, newProvider("conformance-iso-a", "shared-id")); err != nil {
+			t.Fatalf("CreateOIDCProvider: %v", err)
+		}
+		// Same ProviderID, different tenant -- must not collide.
+		if err := s.CreateOIDCProvider(ctx, newProvider("conformance-iso-b", "shared-id")); err != nil {
+			t.Errorf("CreateOIDCProvider in different tenant with same ProviderID: %v", err)
 		}
 	})
 }
