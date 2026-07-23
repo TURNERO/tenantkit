@@ -45,6 +45,26 @@ var schema = []string{
 		tenant_id   TEXT NOT NULL,
 		user_id     TEXT NOT NULL DEFAULT ''
 	)`,
+	`CREATE TABLE IF NOT EXISTS oidc_providers (
+		tenant_id       TEXT NOT NULL,
+		provider_id     TEXT NOT NULL,
+		name            TEXT NOT NULL,
+		issuer_url      TEXT NOT NULL,
+		client_id       TEXT NOT NULL,
+		client_secret   TEXT NOT NULL,
+		scopes          TEXT NOT NULL,
+		domains         TEXT NOT NULL,
+		tenant_id_claim TEXT NOT NULL,
+		user_id_claim   TEXT NOT NULL DEFAULT '',
+		username_claim  TEXT NOT NULL DEFAULT '',
+		roles_claim     TEXT NOT NULL DEFAULT '',
+		PRIMARY KEY (tenant_id, provider_id)
+	)`,
+	`CREATE TABLE IF NOT EXISTS oidc_provider_domains (
+		domain      TEXT PRIMARY KEY,
+		tenant_id   TEXT NOT NULL,
+		provider_id TEXT NOT NULL
+	)`,
 }
 
 // Store is a SQLite-backed store.TenantStore, store.UserStore,
@@ -88,10 +108,11 @@ func (s *Store) Close() error {
 }
 
 var (
-	_ store.TenantStore     = (*Store)(nil)
-	_ store.UserStore       = (*Store)(nil)
-	_ store.APIKeyStore     = (*Store)(nil)
-	_ store.ClientCertStore = (*Store)(nil)
+	_ store.TenantStore       = (*Store)(nil)
+	_ store.UserStore         = (*Store)(nil)
+	_ store.APIKeyStore       = (*Store)(nil)
+	_ store.ClientCertStore   = (*Store)(nil)
+	_ store.OIDCProviderStore = (*Store)(nil)
 )
 
 // isUniqueViolation reports whether err is a SQLite PRIMARY KEY or
@@ -297,6 +318,194 @@ func (s *Store) RevokeClientCert(ctx context.Context, fingerprint string) error 
 	}
 	if n == 0 {
 		return store.ErrNotFound
+	}
+	return nil
+}
+
+func scanOIDCProvider(row *sql.Row) (*tenantkit.OIDCProvider, error) {
+	var p tenantkit.OIDCProvider
+	var scopesJSON, domainsJSON string
+	err := row.Scan(&p.TenantID, &p.ProviderID, &p.Name, &p.IssuerURL, &p.ClientID, &p.ClientSecret,
+		&scopesJSON, &domainsJSON, &p.ClaimsMapping.TenantIDClaim, &p.ClaimsMapping.UserIDClaim,
+		&p.ClaimsMapping.UsernameClaim, &p.ClaimsMapping.RolesClaim)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, store.ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get oidc provider: %w", err)
+	}
+	if err := json.Unmarshal([]byte(scopesJSON), &p.Scopes); err != nil {
+		return nil, fmt.Errorf("decode scopes: %w", err)
+	}
+	if err := json.Unmarshal([]byte(domainsJSON), &p.Domains); err != nil {
+		return nil, fmt.Errorf("decode domains: %w", err)
+	}
+	return &p, nil
+}
+
+const oidcProviderColumns = `tenant_id, provider_id, name, issuer_url, client_id, client_secret, scopes, domains, tenant_id_claim, user_id_claim, username_claim, roles_claim`
+
+func (s *Store) GetOIDCProvider(ctx context.Context, tenantID, providerID string) (*tenantkit.OIDCProvider, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT `+oidcProviderColumns+` FROM oidc_providers WHERE tenant_id = ? AND provider_id = ?`, tenantID, providerID)
+	return scanOIDCProvider(row)
+}
+
+func (s *Store) GetOIDCProviderByDomain(ctx context.Context, domain string) (*tenantkit.OIDCProvider, error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT p.tenant_id, p.provider_id, p.name, p.issuer_url, p.client_id, p.client_secret, p.scopes, p.domains, p.tenant_id_claim, p.user_id_claim, p.username_claim, p.roles_claim
+		FROM oidc_providers p
+		JOIN oidc_provider_domains d ON d.tenant_id = p.tenant_id AND d.provider_id = p.provider_id
+		WHERE d.domain = ?`, domain)
+	return scanOIDCProvider(row)
+}
+
+func (s *Store) ListOIDCProviders(ctx context.Context, tenantID string) ([]*tenantkit.OIDCProvider, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT `+oidcProviderColumns+` FROM oidc_providers WHERE tenant_id = ? ORDER BY provider_id`, tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("list oidc providers: %w", err)
+	}
+	defer rows.Close()
+
+	var out []*tenantkit.OIDCProvider
+	for rows.Next() {
+		var p tenantkit.OIDCProvider
+		var scopesJSON, domainsJSON string
+		if err := rows.Scan(&p.TenantID, &p.ProviderID, &p.Name, &p.IssuerURL, &p.ClientID, &p.ClientSecret,
+			&scopesJSON, &domainsJSON, &p.ClaimsMapping.TenantIDClaim, &p.ClaimsMapping.UserIDClaim,
+			&p.ClaimsMapping.UsernameClaim, &p.ClaimsMapping.RolesClaim); err != nil {
+			return nil, fmt.Errorf("scan oidc provider: %w", err)
+		}
+		if err := json.Unmarshal([]byte(scopesJSON), &p.Scopes); err != nil {
+			return nil, fmt.Errorf("decode scopes: %w", err)
+		}
+		if err := json.Unmarshal([]byte(domainsJSON), &p.Domains); err != nil {
+			return nil, fmt.Errorf("decode domains: %w", err)
+		}
+		out = append(out, &p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list oidc providers: %w", err)
+	}
+	return out, nil
+}
+
+func (s *Store) CreateOIDCProvider(ctx context.Context, p *tenantkit.OIDCProvider) error {
+	scopesJSON, err := json.Marshal(p.Scopes)
+	if err != nil {
+		return fmt.Errorf("encode scopes: %w", err)
+	}
+	domainsJSON, err := json.Marshal(p.Domains)
+	if err != nil {
+		return fmt.Errorf("encode domains: %w", err)
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("create oidc provider: %w", err)
+	}
+	defer tx.Rollback()
+
+	_, err = tx.ExecContext(ctx, `INSERT INTO oidc_providers (`+oidcProviderColumns+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		p.TenantID, p.ProviderID, p.Name, p.IssuerURL, p.ClientID, p.ClientSecret, string(scopesJSON), string(domainsJSON),
+		p.ClaimsMapping.TenantIDClaim, p.ClaimsMapping.UserIDClaim, p.ClaimsMapping.UsernameClaim, p.ClaimsMapping.RolesClaim)
+	if isUniqueViolation(err) {
+		return store.ErrAlreadyExists
+	}
+	if err != nil {
+		return fmt.Errorf("create oidc provider: %w", err)
+	}
+
+	for _, d := range p.Domains {
+		_, err := tx.ExecContext(ctx, `INSERT INTO oidc_provider_domains (domain, tenant_id, provider_id) VALUES (?, ?, ?)`, d, p.TenantID, p.ProviderID)
+		if isUniqueViolation(err) {
+			return store.ErrDomainTaken
+		}
+		if err != nil {
+			return fmt.Errorf("create oidc provider: %w", err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("create oidc provider: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) UpdateOIDCProvider(ctx context.Context, p *tenantkit.OIDCProvider) error {
+	scopesJSON, err := json.Marshal(p.Scopes)
+	if err != nil {
+		return fmt.Errorf("encode scopes: %w", err)
+	}
+	domainsJSON, err := json.Marshal(p.Domains)
+	if err != nil {
+		return fmt.Errorf("encode domains: %w", err)
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("update oidc provider: %w", err)
+	}
+	defer tx.Rollback()
+
+	res, err := tx.ExecContext(ctx, `UPDATE oidc_providers SET name = ?, issuer_url = ?, client_id = ?, client_secret = ?, scopes = ?, domains = ?, tenant_id_claim = ?, user_id_claim = ?, username_claim = ?, roles_claim = ? WHERE tenant_id = ? AND provider_id = ?`,
+		p.Name, p.IssuerURL, p.ClientID, p.ClientSecret, string(scopesJSON), string(domainsJSON),
+		p.ClaimsMapping.TenantIDClaim, p.ClaimsMapping.UserIDClaim, p.ClaimsMapping.UsernameClaim, p.ClaimsMapping.RolesClaim,
+		p.TenantID, p.ProviderID)
+	if err != nil {
+		return fmt.Errorf("update oidc provider: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("update oidc provider: %w", err)
+	}
+	if n == 0 {
+		return store.ErrNotFound
+	}
+
+	if _, err := tx.ExecContext(ctx, `DELETE FROM oidc_provider_domains WHERE tenant_id = ? AND provider_id = ?`, p.TenantID, p.ProviderID); err != nil {
+		return fmt.Errorf("update oidc provider: %w", err)
+	}
+	for _, d := range p.Domains {
+		_, err := tx.ExecContext(ctx, `INSERT INTO oidc_provider_domains (domain, tenant_id, provider_id) VALUES (?, ?, ?)`, d, p.TenantID, p.ProviderID)
+		if isUniqueViolation(err) {
+			return store.ErrDomainTaken
+		}
+		if err != nil {
+			return fmt.Errorf("update oidc provider: %w", err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("update oidc provider: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) DeleteOIDCProvider(ctx context.Context, tenantID, providerID string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("delete oidc provider: %w", err)
+	}
+	defer tx.Rollback()
+
+	res, err := tx.ExecContext(ctx, `DELETE FROM oidc_providers WHERE tenant_id = ? AND provider_id = ?`, tenantID, providerID)
+	if err != nil {
+		return fmt.Errorf("delete oidc provider: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("delete oidc provider: %w", err)
+	}
+	if n == 0 {
+		return store.ErrNotFound
+	}
+
+	if _, err := tx.ExecContext(ctx, `DELETE FROM oidc_provider_domains WHERE tenant_id = ? AND provider_id = ?`, tenantID, providerID); err != nil {
+		return fmt.Errorf("delete oidc provider: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("delete oidc provider: %w", err)
 	}
 	return nil
 }
