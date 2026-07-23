@@ -26,6 +26,9 @@ type Store struct {
 	apiKeys map[string]*tenantkit.APIKey
 
 	clientCerts map[string]*tenantkit.ClientCert
+
+	oidcProviders       map[oidcProviderKey]*tenantkit.OIDCProvider
+	oidcProviderDomains map[string]oidcProviderKey // domain -> (tenantID, providerID)
 }
 
 type usernameKey struct {
@@ -33,22 +36,30 @@ type usernameKey struct {
 	username string
 }
 
+type oidcProviderKey struct {
+	tenantID   string
+	providerID string
+}
+
 // New returns an empty Store.
 func New() *Store {
 	return &Store{
-		tenants:     make(map[string]*tenantkit.Tenant),
-		users:       make(map[string]*tenantkit.Identity),
-		usersByKey:  make(map[usernameKey]string),
-		apiKeys:     make(map[string]*tenantkit.APIKey),
-		clientCerts: make(map[string]*tenantkit.ClientCert),
+		tenants:             make(map[string]*tenantkit.Tenant),
+		users:               make(map[string]*tenantkit.Identity),
+		usersByKey:          make(map[usernameKey]string),
+		apiKeys:             make(map[string]*tenantkit.APIKey),
+		clientCerts:         make(map[string]*tenantkit.ClientCert),
+		oidcProviders:       make(map[oidcProviderKey]*tenantkit.OIDCProvider),
+		oidcProviderDomains: make(map[string]oidcProviderKey),
 	}
 }
 
 var (
-	_ store.TenantStore     = (*Store)(nil)
-	_ store.UserStore       = (*Store)(nil)
-	_ store.APIKeyStore     = (*Store)(nil)
-	_ store.ClientCertStore = (*Store)(nil)
+	_ store.TenantStore        = (*Store)(nil)
+	_ store.UserStore          = (*Store)(nil)
+	_ store.APIKeyStore        = (*Store)(nil)
+	_ store.ClientCertStore    = (*Store)(nil)
+	_ store.OIDCProviderStore  = (*Store)(nil)
 )
 
 func (s *Store) GetTenant(ctx context.Context, tenantID string) (*tenantkit.Tenant, error) {
@@ -198,5 +209,102 @@ func (s *Store) RevokeClientCert(ctx context.Context, fingerprint string) error 
 		return store.ErrNotFound
 	}
 	delete(s.clientCerts, fingerprint)
+	return nil
+}
+
+func cloneOIDCProvider(p *tenantkit.OIDCProvider) *tenantkit.OIDCProvider {
+	cp := *p
+	cp.Scopes = append([]string(nil), p.Scopes...)
+	cp.Domains = append([]string(nil), p.Domains...)
+	return &cp
+}
+
+func (s *Store) GetOIDCProvider(ctx context.Context, tenantID, providerID string) (*tenantkit.OIDCProvider, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p, ok := s.oidcProviders[oidcProviderKey{tenantID, providerID}]
+	if !ok {
+		return nil, store.ErrNotFound
+	}
+	return cloneOIDCProvider(p), nil
+}
+
+func (s *Store) GetOIDCProviderByDomain(ctx context.Context, domain string) (*tenantkit.OIDCProvider, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key, ok := s.oidcProviderDomains[domain]
+	if !ok {
+		return nil, store.ErrNotFound
+	}
+	return cloneOIDCProvider(s.oidcProviders[key]), nil
+}
+
+func (s *Store) ListOIDCProviders(ctx context.Context, tenantID string) ([]*tenantkit.OIDCProvider, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []*tenantkit.OIDCProvider
+	for key, p := range s.oidcProviders {
+		if key.tenantID == tenantID {
+			out = append(out, cloneOIDCProvider(p))
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ProviderID < out[j].ProviderID })
+	return out, nil
+}
+
+func (s *Store) CreateOIDCProvider(ctx context.Context, p *tenantkit.OIDCProvider) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := oidcProviderKey{p.TenantID, p.ProviderID}
+	if _, ok := s.oidcProviders[key]; ok {
+		return store.ErrAlreadyExists
+	}
+	for _, d := range p.Domains {
+		if _, ok := s.oidcProviderDomains[d]; ok {
+			return store.ErrDomainTaken
+		}
+	}
+	s.oidcProviders[key] = cloneOIDCProvider(p)
+	for _, d := range p.Domains {
+		s.oidcProviderDomains[d] = key
+	}
+	return nil
+}
+
+func (s *Store) UpdateOIDCProvider(ctx context.Context, p *tenantkit.OIDCProvider) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := oidcProviderKey{p.TenantID, p.ProviderID}
+	old, ok := s.oidcProviders[key]
+	if !ok {
+		return store.ErrNotFound
+	}
+	for _, d := range p.Domains {
+		if owner, ok := s.oidcProviderDomains[d]; ok && owner != key {
+			return store.ErrDomainTaken
+		}
+	}
+	for _, d := range old.Domains {
+		delete(s.oidcProviderDomains, d)
+	}
+	s.oidcProviders[key] = cloneOIDCProvider(p)
+	for _, d := range p.Domains {
+		s.oidcProviderDomains[d] = key
+	}
+	return nil
+}
+
+func (s *Store) DeleteOIDCProvider(ctx context.Context, tenantID, providerID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := oidcProviderKey{tenantID, providerID}
+	p, ok := s.oidcProviders[key]
+	if !ok {
+		return store.ErrNotFound
+	}
+	for _, d := range p.Domains {
+		delete(s.oidcProviderDomains, d)
+	}
+	delete(s.oidcProviders, key)
 	return nil
 }
