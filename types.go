@@ -43,3 +43,31 @@ type ClientCert struct {
 	TenantID    string
 	UserID      string
 }
+
+// OIDCProvider is a tenant's registration of an external OIDC-compliant
+// IdP. A tenant may register more than one (ProviderID is unique per
+// tenant, not globally); Domains must be globally unique across every
+// tenant and provider (see store.OIDCProviderStore.GetOIDCProviderByDomain).
+type OIDCProvider struct {
+	TenantID      string
+	ProviderID    string // slug, unique within a tenant, e.g. "okta", "google"
+	Name          string // display label for a login picker, e.g. "Acme Corp Okta"
+	IssuerURL     string
+	ClientID      string
+	ClientSecret  string   // plain text -- see store package doc for why
+	Scopes        []string // e.g. []string{"openid", "email"}
+	Domains       []string // e.g. []string{"acme.com", "acme.co.uk"} -- globally unique across all tenants
+	ClaimsMapping ClaimsMapping
+}
+
+// ClaimsMapping says which of a verified OIDC ID token's claims
+// identity/oidc reads to build an Identity. TenantIDClaim is required
+// (no standard claim holds a tenant ID); the rest default when empty:
+// UserIDClaim to "sub", UsernameClaim to "email", RolesClaim to "roles"
+// (its claim value must be a JSON array of strings).
+type ClaimsMapping struct {
+	TenantIDClaim string
+	UserIDClaim   string
+	UsernameClaim string
+	RolesClaim    string
+}
