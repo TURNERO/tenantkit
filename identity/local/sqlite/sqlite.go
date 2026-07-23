@@ -158,7 +158,7 @@ var _ local.SessionStore = (*Store)(nil)
 func (s *Store) CreateSession(ctx context.Context, tenantID, userID string, ttl time.Duration) (string, error) {
 	token, err := store.GenerateSecret()
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("create session: %w", err)
 	}
 	expiresAt := time.Now().Add(ttl).Unix()
 	_, err = s.db.ExecContext(ctx, `INSERT INTO sessions (token, tenant_id, user_id, expires_at) VALUES (?, ?, ?, ?)`,
