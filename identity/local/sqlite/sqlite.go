@@ -241,4 +241,3 @@ func (s *Store) Take(ctx context.Context, token string) ([]byte, error) {
 	}
 	return payload, nil
 }
-
