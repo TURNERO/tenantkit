@@ -1,0 +1,243 @@
+// Package sqlite is a SQLite-backed implementation of identity/local's
+// storage interfaces (CredentialStore, SessionStore, EphemeralStore),
+// using the same pure-Go modernc.org/sqlite driver, Open/Close, and
+// schema-migration pattern as tenantkit/store/sqlite. Unlike
+// identity/local/memstore, this is meant for real use: a persistent
+// backend for identity/local's password, WebAuthn, session, and
+// password-reset state.
+package sqlite
+
+import (
+	"context"
+	"database/sql"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/TURNERO/tenantkit/identity/local"
+	"github.com/TURNERO/tenantkit/store"
+
+	"github.com/go-webauthn/webauthn/webauthn"
+	_ "modernc.org/sqlite"
+)
+
+var schema = []string{
+	`CREATE TABLE IF NOT EXISTS password_hashes (
+		tenant_id TEXT NOT NULL,
+		user_id   TEXT NOT NULL,
+		hash      TEXT NOT NULL,
+		PRIMARY KEY (tenant_id, user_id)
+	)`,
+	`CREATE TABLE IF NOT EXISTS webauthn_credentials (
+		credential_id TEXT PRIMARY KEY,
+		tenant_id     TEXT NOT NULL,
+		user_id       TEXT NOT NULL,
+		data          TEXT NOT NULL
+	)`,
+	`CREATE INDEX IF NOT EXISTS webauthn_credentials_user ON webauthn_credentials (tenant_id, user_id)`,
+	`CREATE TABLE IF NOT EXISTS sessions (
+		token      TEXT PRIMARY KEY,
+		tenant_id  TEXT NOT NULL,
+		user_id    TEXT NOT NULL,
+		expires_at INTEGER NOT NULL
+	)`,
+	`CREATE TABLE IF NOT EXISTS ephemeral_tokens (
+		token      TEXT PRIMARY KEY,
+		payload    BLOB NOT NULL,
+		expires_at INTEGER NOT NULL
+	)`,
+}
+
+// Store is a SQLite-backed local.CredentialStore, local.SessionStore,
+// and local.EphemeralStore.
+type Store struct {
+	db *sql.DB
+}
+
+// Open opens (creating if necessary) a SQLite database at dsn and runs
+// its schema migration. dsn is passed directly to modernc.org/sqlite --
+// a file path, or ":memory:" for a non-persistent in-process database
+// (typically for tests).
+//
+// For ":memory:", Open limits the connection pool to a single
+// connection, matching tenantkit/store/sqlite.Open -- SQLite's
+// in-memory mode gives each connection its own private database, so
+// without this, database/sql's connection pooling would make different
+// queries silently see different, mostly-empty databases.
+func Open(dsn string) (*Store, error) {
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("open sqlite: %w", err)
+	}
+	if dsn == ":memory:" {
+		db.SetMaxOpenConns(1)
+	}
+	for _, stmt := range schema {
+		if _, err := db.Exec(stmt); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("migrate: %w", err)
+		}
+	}
+	return &Store{db: db}, nil
+}
+
+// Close closes the underlying database connection(s).
+func (s *Store) Close() error {
+	return s.db.Close()
+}
+
+var _ local.CredentialStore = (*Store)(nil)
+
+func (s *Store) SetPasswordHash(ctx context.Context, tenantID, userID, hash string) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO password_hashes (tenant_id, user_id, hash) VALUES (?, ?, ?)
+		ON CONFLICT (tenant_id, user_id) DO UPDATE SET hash = excluded.hash`,
+		tenantID, userID, hash)
+	if err != nil {
+		return fmt.Errorf("set password hash: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) GetPasswordHash(ctx context.Context, tenantID, userID string) (string, error) {
+	var hash string
+	err := s.db.QueryRowContext(ctx, `SELECT hash FROM password_hashes WHERE tenant_id = ? AND user_id = ?`, tenantID, userID).
+		Scan(&hash)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", local.ErrNotFound
+	}
+	if err != nil {
+		return "", fmt.Errorf("get password hash: %w", err)
+	}
+	return hash, nil
+}
+
+func (s *Store) AddWebAuthnCredential(ctx context.Context, tenantID, userID string, cred webauthn.Credential) error {
+	data, err := json.Marshal(cred)
+	if err != nil {
+		return fmt.Errorf("encode webauthn credential: %w", err)
+	}
+	credentialID := base64.RawURLEncoding.EncodeToString(cred.ID)
+	_, err = s.db.ExecContext(ctx, `INSERT INTO webauthn_credentials (credential_id, tenant_id, user_id, data) VALUES (?, ?, ?, ?)`,
+		credentialID, tenantID, userID, string(data))
+	if err != nil {
+		return fmt.Errorf("add webauthn credential: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) GetWebAuthnCredentials(ctx context.Context, tenantID, userID string) ([]webauthn.Credential, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT data FROM webauthn_credentials WHERE tenant_id = ? AND user_id = ? ORDER BY credential_id`, tenantID, userID)
+	if err != nil {
+		return nil, fmt.Errorf("get webauthn credentials: %w", err)
+	}
+	defer rows.Close()
+
+	var out []webauthn.Credential
+	for rows.Next() {
+		var data string
+		if err := rows.Scan(&data); err != nil {
+			return nil, fmt.Errorf("scan webauthn credential: %w", err)
+		}
+		var cred webauthn.Credential
+		if err := json.Unmarshal([]byte(data), &cred); err != nil {
+			return nil, fmt.Errorf("decode webauthn credential: %w", err)
+		}
+		out = append(out, cred)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("get webauthn credentials: %w", err)
+	}
+	return out, nil
+}
+
+var _ local.SessionStore = (*Store)(nil)
+
+func (s *Store) CreateSession(ctx context.Context, tenantID, userID string, ttl time.Duration) (string, error) {
+	token, err := store.GenerateSecret()
+	if err != nil {
+		return "", fmt.Errorf("create session: %w", err)
+	}
+	expiresAt := time.Now().Add(ttl).Unix()
+	_, err = s.db.ExecContext(ctx, `INSERT INTO sessions (token, tenant_id, user_id, expires_at) VALUES (?, ?, ?, ?)`,
+		token, tenantID, userID, expiresAt)
+	if err != nil {
+		return "", fmt.Errorf("create session: %w", err)
+	}
+	return token, nil
+}
+
+func (s *Store) GetSession(ctx context.Context, token string) (string, string, error) {
+	var tenantID, userID string
+	var expiresAt int64
+	err := s.db.QueryRowContext(ctx, `SELECT tenant_id, user_id, expires_at FROM sessions WHERE token = ?`, token).
+		Scan(&tenantID, &userID, &expiresAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", "", local.ErrNotFound
+	}
+	if err != nil {
+		return "", "", fmt.Errorf("get session: %w", err)
+	}
+	if time.Now().Unix() > expiresAt {
+		return "", "", local.ErrExpired
+	}
+	return tenantID, userID, nil
+}
+
+func (s *Store) DeleteSession(ctx context.Context, token string) error {
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM sessions WHERE token = ?`, token); err != nil {
+		return fmt.Errorf("delete session: %w", err)
+	}
+	return nil
+}
+
+var _ local.EphemeralStore = (*Store)(nil)
+
+func (s *Store) Put(ctx context.Context, token string, payload []byte, ttl time.Duration) error {
+	expiresAt := time.Now().Add(ttl).Unix()
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO ephemeral_tokens (token, payload, expires_at) VALUES (?, ?, ?)
+		ON CONFLICT (token) DO UPDATE SET payload = excluded.payload, expires_at = excluded.expires_at`,
+		token, payload, expiresAt)
+	if err != nil {
+		return fmt.Errorf("put ephemeral token: %w", err)
+	}
+	return nil
+}
+
+// Take fetches and deletes token's row in one transaction, so the
+// delete happens regardless of the outcome (found, expired, or not
+// found) -- concurrent Take calls for the same token can't both
+// succeed, matching local.EphemeralStore's single-use contract.
+func (s *Store) Take(ctx context.Context, token string) ([]byte, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("take ephemeral token: %w", err)
+	}
+	defer tx.Rollback()
+
+	var payload []byte
+	var expiresAt int64
+	err = tx.QueryRowContext(ctx, `SELECT payload, expires_at FROM ephemeral_tokens WHERE token = ?`, token).
+		Scan(&payload, &expiresAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, local.ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("take ephemeral token: %w", err)
+	}
+
+	if _, err := tx.ExecContext(ctx, `DELETE FROM ephemeral_tokens WHERE token = ?`, token); err != nil {
+		return nil, fmt.Errorf("take ephemeral token: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("take ephemeral token: %w", err)
+	}
+
+	if time.Now().Unix() > expiresAt {
+		return nil, local.ErrExpired
+	}
+	return payload, nil
+}

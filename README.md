@@ -59,7 +59,8 @@ the API-key generation/hashing/rotation helpers, a pluggable
 (`tenantkit/admin`), the admin CLI (`tools/cmd/tenantkit-admin`), and
 `identity/local` — password (bcrypt) and WebAuthn (passkey)
 authentication, opaque-token sessions, and password reset, satisfying the
-`IdentityProvider` interface `httpmw`/`grpcmw` already consume.
+`IdentityProvider` interface `httpmw`/`grpcmw` already consume, plus a
+persistent SQLite-backed store for it (`identity/local/sqlite`).
 `identity/oidc` is not yet built — see `docs/superpowers/specs/` for the
 full design and `docs/superpowers/plans/` for implementation status. Not
 yet ready for production use.
