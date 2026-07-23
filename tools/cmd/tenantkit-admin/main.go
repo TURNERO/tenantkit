@@ -31,6 +31,7 @@ func newRootCmd() *cobra.Command {
 	cmd.AddCommand(newKeyCmd())
 	cmd.AddCommand(newUserCmd())
 	cmd.AddCommand(newCertCmd())
+	cmd.AddCommand(newOIDCCmd())
 	return cmd
 }
 
