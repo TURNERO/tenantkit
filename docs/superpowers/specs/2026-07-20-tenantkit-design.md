@@ -289,6 +289,17 @@ The response body on rejection goes through a pluggable `ErrorHandler`
 so a consumer can return JSON or another format; `httpmw` ships a
 minimal plain-text default (`http.Error`-style) if none is configured.
 
+`grpcmw` has its own `ErrorHandler` (`func(code codes.Code, err error)
+error`), gRPC's equivalent -- there's no response body to write, so it
+builds the `error` (typically via `status.Error`) returned to the
+client instead. Its default wraps `err.Error()` into `status.Error`
+unmodified, same as `httpmw`'s default: neither redacts the underlying
+error text by default, both expose an override for a consumer who wants
+to (issue #3 -- `grpcmw` originally had no such hook at all, so a
+backend/store failure's raw error text reached gRPC clients
+unconditionally; resolved by adding this hook rather than changing the
+default, to stay consistent with `httpmw`'s existing behavior).
+
 tenantkit never touches tenant-scoped *application* data. Scoping actual
 queries (`WHERE tenant_id = ?`, or store-specific mechanisms like ClickHouse
 Row Policies) is the consumer's responsibility every time.

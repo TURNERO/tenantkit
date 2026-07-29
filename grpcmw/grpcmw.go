@@ -11,6 +11,7 @@ package grpcmw
 
 import (
 	"context"
+	"fmt"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -22,44 +23,63 @@ import (
 	"github.com/TURNERO/tenantkit/store"
 )
 
+// ErrorHandler builds the error returned to the gRPC client for a
+// rejected call. code is the codes.Code grpcmw selected (Unauthenticated
+// or PermissionDenied); err is the underlying error -- a
+// resolver/store/IdentityProvider error, or one of grpcmw's own sentinel
+// errors (errNoCredentials, errInactiveTenant, errIdentityTenantMismatch).
+//
+// The default wraps err.Error() directly into status.Error(code, ...),
+// same as grpcmw's behavior before this hook existed -- so a backend or
+// store failure's raw error text reaches the client by default, same as
+// httpmw's default ErrorHandler. Override to redact it, e.g. log err
+// server-side and return status.Error(code, "internal error") to the
+// client instead, or attach status details via status.New(code,
+// "...").WithDetails(...).Err().
+type ErrorHandler func(code codes.Code, err error) error
+
 // Config configures the interceptors returned by UnaryServerInterceptor
 // and StreamServerInterceptor. Same shape and semantics as httpmw.Config
-// -- see its doc comment -- minus an HTTP-specific ErrorHandler; gRPC
-// rejections are reported via status codes instead.
+// -- see its doc comment -- with ErrorHandler as gRPC's equivalent of
+// httpmw.ErrorHandler: httpmw's writes an HTTP response, gRPC has no
+// response body to write, so grpcmw's builds the status error to return.
 type Config struct {
 	Resolvers        []resolve.TenantResolver
 	TenantStore      store.TenantStore
 	IdentityProvider identity.IdentityProvider
+	// ErrorHandler is optional. Defaults to wrapping err.Error() into
+	// status.Error(code, ...) unmodified if not set.
+	ErrorHandler ErrorHandler
 }
 
-func resolveAndAuthenticate(ctx context.Context, cfg Config) (context.Context, error) {
+func resolveAndAuthenticate(ctx context.Context, cfg Config, errorHandler ErrorHandler) (context.Context, error) {
 	src := grpcSource{ctx: ctx}
 
 	tenantID, err := resolve.RunChain(ctx, cfg.Resolvers, src)
 	if err != nil {
-		return nil, status.Error(codes.Unauthenticated, err.Error())
+		return nil, errorHandler(codes.Unauthenticated, err)
 	}
 	if tenantID == "" {
-		return nil, status.Error(codes.Unauthenticated, "grpcmw: no credentials presented")
+		return nil, errorHandler(codes.Unauthenticated, errNoCredentials)
 	}
 
 	tenant, err := cfg.TenantStore.GetTenant(ctx, tenantID)
 	if err != nil {
-		return nil, status.Error(codes.PermissionDenied, err.Error())
+		return nil, errorHandler(codes.PermissionDenied, err)
 	}
 	if !tenant.Active {
-		return nil, status.Error(codes.PermissionDenied, "grpcmw: tenant is inactive")
+		return nil, errorHandler(codes.PermissionDenied, errInactiveTenant)
 	}
 	ctx = tenantkit.WithTenant(ctx, tenant)
 
 	if cfg.IdentityProvider != nil {
 		id, err := cfg.IdentityProvider.Authenticate(ctx, src)
 		if err != nil {
-			return nil, status.Error(codes.Unauthenticated, err.Error())
+			return nil, errorHandler(codes.Unauthenticated, err)
 		}
 		if id != nil {
 			if id.TenantID != tenantID {
-				return nil, status.Error(codes.PermissionDenied, "grpcmw: identity's tenant does not match resolved tenant")
+				return nil, errorHandler(codes.PermissionDenied, errIdentityTenantMismatch)
 			}
 			ctx = tenantkit.WithIdentity(ctx, id)
 		}
@@ -68,12 +88,26 @@ func resolveAndAuthenticate(ctx context.Context, cfg Config) (context.Context, e
 	return ctx, nil
 }
 
+var (
+	errNoCredentials          = fmt.Errorf("grpcmw: no credentials presented")
+	errInactiveTenant         = fmt.Errorf("grpcmw: tenant is inactive")
+	errIdentityTenantMismatch = fmt.Errorf("grpcmw: identity's tenant does not match resolved tenant")
+)
+
+func defaultErrorHandler(code codes.Code, err error) error {
+	return status.Error(code, err.Error())
+}
+
 // UnaryServerInterceptor returns a grpc.UnaryServerInterceptor that
 // resolves the tenant (and, if configured, the identity) for each unary
 // call.
 func UnaryServerInterceptor(cfg Config) grpc.UnaryServerInterceptor {
+	errorHandler := cfg.ErrorHandler
+	if errorHandler == nil {
+		errorHandler = defaultErrorHandler
+	}
 	return func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
-		ctx, err := resolveAndAuthenticate(ctx, cfg)
+		ctx, err := resolveAndAuthenticate(ctx, cfg, errorHandler)
 		if err != nil {
 			return nil, err
 		}
@@ -85,8 +119,12 @@ func UnaryServerInterceptor(cfg Config) grpc.UnaryServerInterceptor {
 // resolves the tenant (and, if configured, the identity) once at stream
 // start.
 func StreamServerInterceptor(cfg Config) grpc.StreamServerInterceptor {
+	errorHandler := cfg.ErrorHandler
+	if errorHandler == nil {
+		errorHandler = defaultErrorHandler
+	}
 	return func(srv interface{}, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
-		ctx, err := resolveAndAuthenticate(ss.Context(), cfg)
+		ctx, err := resolveAndAuthenticate(ss.Context(), cfg, errorHandler)
 		if err != nil {
 			return err
 		}

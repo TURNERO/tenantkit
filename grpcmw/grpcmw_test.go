@@ -213,3 +213,92 @@ func TestStreamServerInterceptor_NoCredentialsRejectedWithUnauthenticated(t *tes
 		t.Errorf("status code = %v, want Unauthenticated", status.Code(err))
 	}
 }
+
+func TestUnaryServerInterceptor_DefaultErrorHandlerExposesUnderlyingError(t *testing.T) {
+	interceptor := grpcmw.UnaryServerInterceptor(grpcmw.Config{
+		Resolvers:   []resolve.TenantResolver{fakeResolver{ok: true, err: errors.New("backend store unreachable: dial tcp 10.0.0.5:5432")}},
+		TenantStore: memstore.New(),
+	})
+
+	_, err := interceptor(context.Background(), "req", &grpc.UnaryServerInfo{}, func(ctx context.Context, req interface{}) (interface{}, error) {
+		t.Fatal("handler should not be called")
+		return nil, nil
+	})
+	// Default behavior is unchanged from before ErrorHandler existed: the
+	// underlying error's text reaches the client verbatim.
+	if got := status.Convert(err).Message(); got != "backend store unreachable: dial tcp 10.0.0.5:5432" {
+		t.Errorf("status message = %q, want the underlying error text verbatim", got)
+	}
+}
+
+func TestUnaryServerInterceptor_CustomErrorHandlerRedactsUnderlyingError(t *testing.T) {
+	var gotCode codes.Code
+	var gotErr error
+	interceptor := grpcmw.UnaryServerInterceptor(grpcmw.Config{
+		Resolvers:   []resolve.TenantResolver{fakeResolver{ok: true, err: errors.New("backend store unreachable: dial tcp 10.0.0.5:5432")}},
+		TenantStore: memstore.New(),
+		ErrorHandler: func(code codes.Code, err error) error {
+			gotCode, gotErr = code, err
+			return status.Error(code, "internal error")
+		},
+	})
+
+	_, err := interceptor(context.Background(), "req", &grpc.UnaryServerInfo{}, func(ctx context.Context, req interface{}) (interface{}, error) {
+		t.Fatal("handler should not be called")
+		return nil, nil
+	})
+	if got := status.Convert(err).Message(); got != "internal error" {
+		t.Errorf("status message = %q, want the custom handler's redacted message", got)
+	}
+	if gotCode != codes.Unauthenticated {
+		t.Errorf("ErrorHandler code = %v, want Unauthenticated", gotCode)
+	}
+	if gotErr == nil || gotErr.Error() != "backend store unreachable: dial tcp 10.0.0.5:5432" {
+		t.Errorf("ErrorHandler err = %v, want the underlying error verbatim", gotErr)
+	}
+}
+
+func TestUnaryServerInterceptor_CustomErrorHandlerCalledForSentinelErrors(t *testing.T) {
+	var gotErr error
+	interceptor := grpcmw.UnaryServerInterceptor(grpcmw.Config{
+		Resolvers:   []resolve.TenantResolver{fakeResolver{ok: false}},
+		TenantStore: memstore.New(),
+		ErrorHandler: func(code codes.Code, err error) error {
+			gotErr = err
+			return status.Error(code, "no")
+		},
+	})
+
+	_, err := interceptor(context.Background(), "req", &grpc.UnaryServerInfo{}, func(ctx context.Context, req interface{}) (interface{}, error) {
+		t.Fatal("handler should not be called")
+		return nil, nil
+	})
+	// The "no credentials presented" rejection is grpcmw's own sentinel,
+	// not an underlying resolver/store error -- ErrorHandler must still
+	// see it, so a custom handler can uniformly log or reshape every
+	// rejection, not just ones wrapping external errors.
+	if gotErr == nil || gotErr.Error() != "grpcmw: no credentials presented" {
+		t.Errorf("ErrorHandler err = %v, want the no-credentials sentinel", gotErr)
+	}
+	if got := status.Convert(err).Message(); got != "no" {
+		t.Errorf("status message = %q, want the custom handler's message", got)
+	}
+}
+
+func TestStreamServerInterceptor_CustomErrorHandlerRedactsUnderlyingError(t *testing.T) {
+	interceptor := grpcmw.StreamServerInterceptor(grpcmw.Config{
+		Resolvers:   []resolve.TenantResolver{fakeResolver{ok: true, err: errors.New("backend store unreachable")}},
+		TenantStore: memstore.New(),
+		ErrorHandler: func(code codes.Code, err error) error {
+			return status.Error(code, "internal error")
+		},
+	})
+
+	err := interceptor(nil, &fakeServerStream{ctx: context.Background()}, &grpc.StreamServerInfo{}, func(srv interface{}, ss grpc.ServerStream) error {
+		t.Fatal("handler should not be called")
+		return nil
+	})
+	if got := status.Convert(err).Message(); got != "internal error" {
+		t.Errorf("status message = %q, want the custom handler's redacted message", got)
+	}
+}
