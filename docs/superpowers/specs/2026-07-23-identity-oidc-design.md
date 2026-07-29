@@ -262,6 +262,15 @@ or expired → a real error. No IdP round-trip on this path at all --
 that's the entire reason `FinishLogin` created a local session in the
 first place.
 
+**`Logout(ctx, token string) error`** -- deletes the session identified
+by `token` via `SessionStore.DeleteSession`. Added during
+implementation planning: this section originally defined
+`SessionStore.DeleteSession` without ever calling it from `*OIDC` --
+without `Logout`, a consumer had no way to invalidate a session without
+reaching into the `SessionStore` implementation directly. Mirrors
+`identity/local.Logout` exactly, including its idempotency (deleting an
+already-expired or unknown token is not an error).
+
 ## Claims mapping
 
 Applied once, in `FinishLogin` step 7, using the `tenantkit.ClaimsMapping`
