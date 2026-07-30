@@ -43,7 +43,7 @@ func (o *OIDC) FinishLogin(ctx context.Context, state, code string) (*tenantkit.
 
 	idToken, err := client.verifier.Verify(ctx, rawIDToken)
 	if err != nil {
-		return nil, "", fmt.Errorf("tenantkit/identity/oidc: verify id_token: %w", ErrInvalidToken)
+		return nil, "", fmt.Errorf("tenantkit/identity/oidc: verify id_token: %w: %w", err, ErrInvalidToken)
 	}
 	if idToken.Nonce != ceremony.Nonce {
 		return nil, "", fmt.Errorf("tenantkit/identity/oidc: nonce mismatch: %w", ErrInvalidToken)
@@ -51,7 +51,7 @@ func (o *OIDC) FinishLogin(ctx context.Context, state, code string) (*tenantkit.
 
 	var claims map[string]any
 	if err := idToken.Claims(&claims); err != nil {
-		return nil, "", fmt.Errorf("tenantkit/identity/oidc: decode claims: %w", err)
+		return nil, "", fmt.Errorf("tenantkit/identity/oidc: decode claims: %w: %w", err, ErrInvalidToken)
 	}
 	identity, err := mapClaims(claims, client.mapping)
 	if err != nil {

@@ -23,10 +23,11 @@ import (
 // token endpoint, and signs ID tokens in-process -- so FinishLogin's
 // tests never hit a real IdP over the network.
 type fakeIdP struct {
-	server     *httptest.Server
-	key        *rsa.PrivateKey
-	kid        string
-	nextClaims map[string]any // set by the test before calling FinishLogin
+	server      *httptest.Server
+	key         *rsa.PrivateKey
+	kid         string
+	nextClaims  map[string]any // set by the test before calling FinishLogin
+	omitIDToken bool           // set by the test to make the token endpoint omit id_token
 }
 
 func newFakeIdP(t *testing.T) *fakeIdP {
@@ -69,22 +70,25 @@ func (f *fakeIdP) handleToken(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if f.nextClaims == nil {
-		http.Error(w, "no claims configured for this test", http.StatusInternalServerError)
-		return
-	}
-	idToken, err := f.signIDToken(f.nextClaims)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{
+	resp := map[string]any{
 		"access_token": "fake-access-token",
 		"token_type":   "Bearer",
 		"expires_in":   3600,
-		"id_token":     idToken,
-	})
+	}
+	if !f.omitIDToken {
+		if f.nextClaims == nil {
+			http.Error(w, "no claims configured for this test", http.StatusInternalServerError)
+			return
+		}
+		idToken, err := f.signIDToken(f.nextClaims)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		resp["id_token"] = idToken
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
 }
 
 func (f *fakeIdP) signIDToken(claims map[string]any) (string, error) {
@@ -283,5 +287,18 @@ func TestFinishLogin_UnknownStateFails(t *testing.T) {
 
 	if _, _, err := o.FinishLogin(ctx, "bogus-state", "fake-auth-code"); !errors.Is(err, oidc.ErrNotFound) {
 		t.Fatalf("got %v, want ErrNotFound", err)
+	}
+}
+
+func TestFinishLogin_MissingIDTokenRejected(t *testing.T) {
+	ctx := context.Background()
+	idp := newFakeIdP(t)
+	idp.omitIDToken = true
+	o := newTestOIDCWithIdP(t, idp)
+
+	state, _ := beginAndExtractState(t, o)
+
+	if _, _, err := o.FinishLogin(ctx, state, "fake-auth-code"); !errors.Is(err, oidc.ErrInvalidToken) {
+		t.Fatalf("got %v, want ErrInvalidToken", err)
 	}
 }
