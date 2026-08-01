@@ -186,3 +186,81 @@ func TestEphemeralStore(t *testing.T, s local.EphemeralStore) {
 		}
 	})
 }
+
+// TestLoginLimiter runs a battery of subtests against limiter,
+// constructed with maxAttempts as its failure threshold before
+// locking an account out. Pass a fresh, empty limiter.
+func TestLoginLimiter(t *testing.T, limiter local.LoginLimiter, maxAttempts int) {
+	t.Helper()
+	ctx := context.Background()
+
+	t.Run("AllowedBelowThreshold", func(t *testing.T) {
+		for i := 0; i < maxAttempts-1; i++ {
+			if err := limiter.RecordFailure(ctx, "acme", "alice"); err != nil {
+				t.Fatalf("RecordFailure: %v", err)
+			}
+		}
+		allowed, err := limiter.Allow(ctx, "acme", "alice")
+		if err != nil {
+			t.Fatalf("Allow: %v", err)
+		}
+		if !allowed {
+			t.Fatal("expected allowed one below threshold")
+		}
+	})
+
+	t.Run("LockedAtThreshold", func(t *testing.T) {
+		for i := 0; i < maxAttempts; i++ {
+			if err := limiter.RecordFailure(ctx, "acme", "bob"); err != nil {
+				t.Fatalf("RecordFailure: %v", err)
+			}
+		}
+		allowed, err := limiter.Allow(ctx, "acme", "bob")
+		if err != nil {
+			t.Fatalf("Allow: %v", err)
+		}
+		if allowed {
+			t.Fatal("expected locked out at threshold")
+		}
+	})
+
+	t.Run("RecordSuccessResets", func(t *testing.T) {
+		for i := 0; i < maxAttempts; i++ {
+			if err := limiter.RecordFailure(ctx, "acme", "carol"); err != nil {
+				t.Fatalf("RecordFailure: %v", err)
+			}
+		}
+		if allowed, err := limiter.Allow(ctx, "acme", "carol"); err != nil {
+			t.Fatalf("Allow: %v", err)
+		} else if allowed {
+			t.Fatal("expected locked out before RecordSuccess")
+		}
+
+		if err := limiter.RecordSuccess(ctx, "acme", "carol"); err != nil {
+			t.Fatalf("RecordSuccess: %v", err)
+		}
+
+		allowed, err := limiter.Allow(ctx, "acme", "carol")
+		if err != nil {
+			t.Fatalf("Allow: %v", err)
+		}
+		if !allowed {
+			t.Fatal("expected allowed after RecordSuccess")
+		}
+	})
+
+	t.Run("TenantIsolation", func(t *testing.T) {
+		for i := 0; i < maxAttempts; i++ {
+			if err := limiter.RecordFailure(ctx, "acme", "dave"); err != nil {
+				t.Fatalf("RecordFailure: %v", err)
+			}
+		}
+		allowed, err := limiter.Allow(ctx, "other-tenant", "dave")
+		if err != nil {
+			t.Fatalf("Allow: %v", err)
+		}
+		if !allowed {
+			t.Fatal("expected allowed in a different tenant (tenant isolation)")
+		}
+	})
+}
