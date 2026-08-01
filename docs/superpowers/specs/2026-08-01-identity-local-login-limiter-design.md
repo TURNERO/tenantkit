@@ -34,7 +34,7 @@ In scope:
   can record against the same `(tenantID, username)` key `Begin` used,
   without an extra `UserStore` round-trip.
 - `identity/local/memstore.LoginLimiter` -- in-memory reference
-  implementation, fixed-window failure count, fully configurable
+  implementation, sliding-window failure count, fully configurable
   constructor (`maxAttempts`, `window`, `lockout` -- no hidden
   defaults).
 - `identity/local/storetest.TestLoginLimiter` -- conformance suite.
@@ -101,13 +101,23 @@ payload -- needs `username` added to `webauthnCeremony` so it can
 record against the same key `Begin` used, rather than doing an extra
 `UserStore` round-trip to resolve `userID` back to a username.
 
-**Fixed window, not sliding, for the reference implementation.** A
-failure outside the current window starts a fresh window (failure
-count resets to 1) rather than a full sliding-window log of
-timestamps. Simple, correct, and consistent with this codebase's
-general preference for the simplest mechanism that satisfies the
-actual requirement -- a production backend is free to implement a more
-sophisticated policy behind the same interface.
+**Sliding window for the reference implementation.** Each failure is
+recorded as a timestamp; `Allow`/`RecordFailure` count only the
+timestamps still within `window` of now, pruning older ones as they
+age out. This is deliberately not a fixed window (count reset to zero
+at fixed clock-aligned boundaries) -- a fixed window lets an attacker
+get up to ~2x the intended attempts by timing requests to straddle a
+window boundary (e.g. `maxAttempts-1` failures at the tail of one
+window, then `maxAttempts-1` more right after it resets, never
+tripping the threshold in either window). The sliding-window
+implementation is small (a `[]time.Time` per key instead of a
+`(count, windowStart)` pair, plus a prune loop in `RecordFailure`) and
+doesn't change the interface at all -- `Allow`/`RecordFailure`/
+`RecordSuccess` are identical either way, so this is purely an
+internal choice of `memstore.LoginLimiter`. `lockout` remains a
+separate duration from `window`: once the threshold trips, the account
+stays locked for `lockout` regardless of whether failures have since
+aged out of the counting window.
 
 ## Types and interfaces
 
@@ -161,17 +171,20 @@ type Config struct {
 // identity/local/memstore (limiter.go)
 
 // LoginLimiter is an in-memory reference implementation of
-// local.LoginLimiter: a fixed-window failure count per (tenantID,
+// local.LoginLimiter: a sliding-window failure count per (tenantID,
 // username). Not a production backend -- see package doc.
 type LoginLimiter struct {
 	// unexported: mu sync.Mutex, maxAttempts int, window, lockout
 	// time.Duration, records map[limiterKey]*limiterRecord
 }
 
+// limiterRecord (unexported): failures []time.Time (pruned to the
+// last window on every RecordFailure), lockedUntil time.Time.
+
 // NewLoginLimiter returns a LoginLimiter that locks an account out for
-// lockout after maxAttempts failures within window. A failure outside
-// the current window starts a fresh window instead of accumulating
-// indefinitely (fixed window, not sliding -- see "Design decisions").
+// lockout after maxAttempts failures within a sliding window of
+// duration window (see "Design decisions" for why sliding rather than
+// fixed).
 func NewLoginLimiter(maxAttempts int, window, lockout time.Duration) *LoginLimiter
 ```
 
@@ -349,10 +362,12 @@ func TestLoginLimiter(t *testing.T, limiter local.LoginLimiter, maxAttempts int)
 Subtests: allowed up to one below threshold; locked at threshold;
 `RecordSuccess` resets the counter (a subsequent `Allow` succeeds);
 tenant isolation (same username, different tenant, not locked out).
-Window-based reset is implementation-specific timing, not part of the
-interface contract, so it's tested separately against
-`memstore.LoginLimiter` directly (a failure just outside `window`
-starts a fresh window rather than compounding).
+Window-based pruning is implementation-specific timing, not part of
+the interface contract, so it's tested separately against
+`memstore.LoginLimiter` directly: a failure just outside `window` is
+pruned and doesn't count toward the threshold, and (the property a
+fixed window would get wrong) failures spanning a window boundary
+still correctly accumulate toward the threshold rather than resetting.
 
 `identity/local/memstore`'s own tests additionally verify
 `NewLoginLimiter` satisfies `local.LoginLimiter` (compile-time
@@ -370,4 +385,15 @@ just that the limiter's own unit tests pass in isolation.
 ## Open questions
 
 None blocking. Deferred, tracked for follow-up:
-- A persistent (SQLite) `LoginLimiter` backend.
+- A persistent (SQLite) `LoginLimiter` backend. Sliding window maps
+  naturally onto SQL -- more naturally than the in-memory
+  implementation, arguably -- via a `login_attempts(tenant_id,
+  username, attempted_at)` table indexed on `(tenant_id, username,
+  attempted_at)`; `RecordFailure` inserts a row and can prune anything
+  older than `window` in the same statement, no read-modify-write
+  needed. Since `window` and `lockout` are separate durations (see
+  "Design decisions"), a second small table --
+  `login_lockouts(tenant_id, username, locked_until)` -- is still
+  needed so `Allow` can cheaply check lockout state without
+  re-counting rows on every call, and so a lockout doesn't lift early
+  just because old failures aged out of the counting window.
