@@ -44,3 +44,19 @@ type EphemeralStore interface {
 	// always fails on the second attempt.
 	Take(ctx context.Context, token string) ([]byte, error) // ErrNotFound / ErrExpired
 }
+
+// LoginLimiter tracks failed login attempts per (tenantID, username)
+// and decides whether a login attempt should proceed. Consulted by
+// LoginWithPassword and the WebAuthn login ceremony alike -- any
+// failed authentication attempt, regardless of method, counts against
+// the same lockout.
+type LoginLimiter interface {
+	// Allow reports whether a login attempt for (tenantID, username)
+	// should proceed.
+	Allow(ctx context.Context, tenantID, username string) (bool, error)
+	// RecordFailure records a failed attempt, which may cause a
+	// subsequent Allow to return false.
+	RecordFailure(ctx context.Context, tenantID, username string) error
+	// RecordSuccess resets any failure count for (tenantID, username).
+	RecordSuccess(ctx context.Context, tenantID, username string) error
+}

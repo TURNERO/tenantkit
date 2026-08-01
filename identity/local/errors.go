@@ -14,4 +14,8 @@ var (
 	// ErrNotFound, so a caller can't distinguish "no such user" from
 	// "wrong credential" even if it wanted to.
 	ErrInvalidCredentials = errors.New("tenantkit/identity/local: invalid credentials")
+	// ErrTooManyAttempts is returned by LoginWithPassword and
+	// BeginWebAuthnLogin when a configured LoginLimiter reports the
+	// account is currently locked out.
+	ErrTooManyAttempts = errors.New("tenantkit/identity/local: too many attempts")
 )
