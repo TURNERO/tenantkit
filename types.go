@@ -55,7 +55,7 @@ type OIDCProvider struct {
 	IssuerURL     string
 	ClientID      string
 	ClientSecret  string   // plain text -- see store package doc for why
-	Scopes        []string // e.g. []string{"openid", "email"}
+	Scopes        []string // e.g. []string{"email", "profile"} -- "openid" is added automatically
 	Domains       []string // e.g. []string{"acme.com", "acme.co.uk"} -- globally unique across all tenants
 	ClaimsMapping ClaimsMapping
 }
