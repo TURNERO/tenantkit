@@ -93,9 +93,12 @@ func TestBeginLogin(t *testing.T) {
 		t.Fatalf("CreateOIDCProvider: %v", err)
 	}
 
-	redirectURL, err := o.BeginLogin(ctx, "acme", "okta")
+	redirectURL, state, err := o.BeginLogin(ctx, "acme", "okta")
 	if err != nil {
 		t.Fatalf("BeginLogin: %v", err)
+	}
+	if state == "" {
+		t.Error("expected non-empty state return value")
 	}
 	parsed, err := url.Parse(redirectURL)
 	if err != nil {
@@ -119,7 +122,7 @@ func TestBeginLogin(t *testing.T) {
 func TestBeginLogin_UnknownProvider(t *testing.T) {
 	ctx := context.Background()
 	o, _, _ := newTestOIDC(t)
-	if _, err := o.BeginLogin(ctx, "acme", "nonexistent"); !errors.Is(err, oidc.ErrUnknownProvider) {
+	if _, _, err := o.BeginLogin(ctx, "acme", "nonexistent"); !errors.Is(err, oidc.ErrUnknownProvider) {
 		t.Fatalf("got %v, want ErrUnknownProvider", err)
 	}
 }
@@ -142,7 +145,7 @@ func TestBeginLoginByDomain(t *testing.T) {
 		t.Fatalf("CreateOIDCProvider: %v", err)
 	}
 
-	redirectURL, err := o.BeginLoginByDomain(ctx, "acme.com")
+	redirectURL, _, err := o.BeginLoginByDomain(ctx, "acme.com")
 	if err != nil {
 		t.Fatalf("BeginLoginByDomain: %v", err)
 	}
@@ -154,7 +157,7 @@ func TestBeginLoginByDomain(t *testing.T) {
 func TestBeginLoginByDomain_UnknownDomain(t *testing.T) {
 	ctx := context.Background()
 	o, _, _ := newTestOIDC(t)
-	if _, err := o.BeginLoginByDomain(ctx, "nonexistent.com"); !errors.Is(err, oidc.ErrUnknownProvider) {
+	if _, _, err := o.BeginLoginByDomain(ctx, "nonexistent.com"); !errors.Is(err, oidc.ErrUnknownProvider) {
 		t.Fatalf("got %v, want ErrUnknownProvider", err)
 	}
 }
@@ -182,13 +185,13 @@ func TestBeginLogin_CachesProviderClient(t *testing.T) {
 	// rather than re-resolving from the store -- an incorrect
 	// (non-caching, or wrongly-evicting) implementation would fail
 	// this with ErrUnknownProvider.
-	if _, err := o.BeginLogin(ctx, "acme", "okta"); err != nil {
+	if _, _, err := o.BeginLogin(ctx, "acme", "okta"); err != nil {
 		t.Fatalf("first BeginLogin: %v", err)
 	}
 	if err := providers.DeleteOIDCProvider(ctx, "acme", "okta"); err != nil {
 		t.Fatalf("DeleteOIDCProvider: %v", err)
 	}
-	if _, err := o.BeginLogin(ctx, "acme", "okta"); err != nil {
+	if _, _, err := o.BeginLogin(ctx, "acme", "okta"); err != nil {
 		t.Fatalf("second BeginLogin (should use cache, provider was deleted): %v", err)
 	}
 }

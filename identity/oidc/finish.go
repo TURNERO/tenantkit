@@ -10,11 +10,21 @@ import (
 )
 
 // FinishLogin completes a login ceremony started by BeginLogin or
-// BeginLoginByDomain. state and code are exactly what your callback
-// handler receives on the query string. On success it returns the
-// mapped Identity (e.g. to render a welcome page) and a session token
-// (to set via SetSessionCookie).
-func (o *OIDC) FinishLogin(ctx context.Context, state, code string) (*tenantkit.Identity, string, error) {
+// BeginLoginByDomain. cookieState is the value of the state cookie
+// SetStateCookie set (read it via your callback handler's
+// r.Cookie(oidc.StateCookieName) call); state and code are exactly
+// what the callback received on the query string. FinishLogin rejects
+// the ceremony with ErrInvalidToken if cookieState and state don't
+// match -- this is what binds the ceremony to the browser that started
+// it: without this check, an attacker could start their own ceremony
+// and trick a victim's browser into completing it via the callback
+// URL, receiving a session bound to the attacker's identity
+// (login-CSRF, RFC 9700 §4.7).
+func (o *OIDC) FinishLogin(ctx context.Context, cookieState, state, code string) (*tenantkit.Identity, string, error) {
+	if cookieState == "" || cookieState != state {
+		return nil, "", fmt.Errorf("tenantkit/identity/oidc: state cookie missing or does not match callback state: %w", ErrInvalidToken)
+	}
+
 	payload, err := o.ephemeral.Take(ctx, state)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) || errors.Is(err, ErrExpired) {

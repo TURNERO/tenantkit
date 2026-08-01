@@ -45,6 +45,42 @@ func ClearSessionCookie(w http.ResponseWriter) {
 	})
 }
 
+// StateCookieName is the cookie BeginLogin's returned state value
+// travels in between BeginLogin and FinishLogin, binding the OAuth2
+// ceremony to the browser that started it. See FinishLogin's doc
+// comment for why this matters.
+const StateCookieName = "tenantkit_oidc_state"
+
+// SetStateCookie sets state on w as the OIDC login-ceremony state
+// cookie. Its MaxAge matches the ceremony's own TTL, so it can't
+// outlive the ceremony it protects.
+func SetStateCookie(w http.ResponseWriter, state string) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     StateCookieName,
+		Value:    state,
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   true,
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   int(loginCeremonyTTL.Seconds()),
+	})
+}
+
+// ClearStateCookie removes the OIDC login-ceremony state cookie on w.
+// Call this from your callback handler after FinishLogin, whether it
+// succeeded or failed -- the ceremony is over either way.
+func ClearStateCookie(w http.ResponseWriter) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     StateCookieName,
+		Value:    "",
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   true,
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   -1,
+	})
+}
+
 var _ identity.IdentityProvider = (*OIDC)(nil)
 
 // Authenticate satisfies identity.IdentityProvider. It reads the

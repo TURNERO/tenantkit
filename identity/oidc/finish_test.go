@@ -141,7 +141,7 @@ func newTestOIDCWithIdP(t *testing.T, idp *fakeIdP) *oidc.OIDC {
 // callback.
 func beginAndExtractState(t *testing.T, o *oidc.OIDC) (state, nonce string) {
 	t.Helper()
-	redirectURL, err := o.BeginLogin(context.Background(), "acme", "okta")
+	redirectURL, state, err := o.BeginLogin(context.Background(), "acme", "okta")
 	if err != nil {
 		t.Fatalf("BeginLogin: %v", err)
 	}
@@ -149,7 +149,7 @@ func beginAndExtractState(t *testing.T, o *oidc.OIDC) (state, nonce string) {
 	if err != nil {
 		t.Fatalf("parse redirect URL: %v", err)
 	}
-	return parsed.Query().Get("state"), parsed.Query().Get("nonce")
+	return state, parsed.Query().Get("nonce")
 }
 
 func TestFinishLogin(t *testing.T) {
@@ -172,7 +172,7 @@ func TestFinishLogin(t *testing.T) {
 		"roles":  []string{"admin", "member"},
 	}
 
-	identity, sessionToken, err := o.FinishLogin(ctx, state, "fake-auth-code")
+	identity, sessionToken, err := o.FinishLogin(ctx, state, state, "fake-auth-code")
 	if err != nil {
 		t.Fatalf("FinishLogin: %v", err)
 	}
@@ -200,10 +200,10 @@ func TestFinishLogin_ReplayedStateFails(t *testing.T) {
 		"nonce": nonce, "tenant": "acme",
 	}
 
-	if _, _, err := o.FinishLogin(ctx, state, "fake-auth-code"); err != nil {
+	if _, _, err := o.FinishLogin(ctx, state, state, "fake-auth-code"); err != nil {
 		t.Fatalf("first FinishLogin: %v", err)
 	}
-	if _, _, err := o.FinishLogin(ctx, state, "fake-auth-code"); !errors.Is(err, oidc.ErrNotFound) {
+	if _, _, err := o.FinishLogin(ctx, state, state, "fake-auth-code"); !errors.Is(err, oidc.ErrNotFound) {
 		t.Fatalf("got %v, want ErrNotFound on replayed state", err)
 	}
 }
@@ -221,7 +221,7 @@ func TestFinishLogin_NonceMismatchRejected(t *testing.T) {
 		"nonce": "wrong-nonce", "tenant": "acme",
 	}
 
-	if _, _, err := o.FinishLogin(ctx, state, "fake-auth-code"); !errors.Is(err, oidc.ErrInvalidToken) {
+	if _, _, err := o.FinishLogin(ctx, state, state, "fake-auth-code"); !errors.Is(err, oidc.ErrInvalidToken) {
 		t.Fatalf("got %v, want ErrInvalidToken", err)
 	}
 }
@@ -239,7 +239,7 @@ func TestFinishLogin_TenantClaimMismatchRejected(t *testing.T) {
 		"nonce": nonce, "tenant": "some-other-tenant", // ceremony was started for "acme"
 	}
 
-	if _, _, err := o.FinishLogin(ctx, state, "fake-auth-code"); !errors.Is(err, oidc.ErrInvalidToken) {
+	if _, _, err := o.FinishLogin(ctx, state, state, "fake-auth-code"); !errors.Is(err, oidc.ErrInvalidToken) {
 		t.Fatalf("got %v, want ErrInvalidToken", err)
 	}
 }
@@ -257,7 +257,7 @@ func TestFinishLogin_MalformedRolesClaimRejected(t *testing.T) {
 		"nonce": nonce, "tenant": "acme", "roles": "not-an-array",
 	}
 
-	if _, _, err := o.FinishLogin(ctx, state, "fake-auth-code"); !errors.Is(err, oidc.ErrInvalidToken) {
+	if _, _, err := o.FinishLogin(ctx, state, state, "fake-auth-code"); !errors.Is(err, oidc.ErrInvalidToken) {
 		t.Fatalf("got %v, want ErrInvalidToken", err)
 	}
 }
@@ -275,7 +275,7 @@ func TestFinishLogin_ExpiredTokenRejected(t *testing.T) {
 		"nonce": nonce, "tenant": "acme",
 	}
 
-	if _, _, err := o.FinishLogin(ctx, state, "fake-auth-code"); !errors.Is(err, oidc.ErrInvalidToken) {
+	if _, _, err := o.FinishLogin(ctx, state, state, "fake-auth-code"); !errors.Is(err, oidc.ErrInvalidToken) {
 		t.Fatalf("got %v, want ErrInvalidToken", err)
 	}
 }
@@ -285,7 +285,7 @@ func TestFinishLogin_UnknownStateFails(t *testing.T) {
 	idp := newFakeIdP(t)
 	o := newTestOIDCWithIdP(t, idp)
 
-	if _, _, err := o.FinishLogin(ctx, "bogus-state", "fake-auth-code"); !errors.Is(err, oidc.ErrNotFound) {
+	if _, _, err := o.FinishLogin(ctx, "bogus-state", "bogus-state", "fake-auth-code"); !errors.Is(err, oidc.ErrNotFound) {
 		t.Fatalf("got %v, want ErrNotFound", err)
 	}
 }
@@ -298,7 +298,53 @@ func TestFinishLogin_MissingIDTokenRejected(t *testing.T) {
 
 	state, _ := beginAndExtractState(t, o)
 
-	if _, _, err := o.FinishLogin(ctx, state, "fake-auth-code"); !errors.Is(err, oidc.ErrInvalidToken) {
+	if _, _, err := o.FinishLogin(ctx, state, state, "fake-auth-code"); !errors.Is(err, oidc.ErrInvalidToken) {
+		t.Fatalf("got %v, want ErrInvalidToken", err)
+	}
+}
+
+// TestFinishLogin_StateCookieMismatchRejected proves the state-cookie
+// binding (RFC 9700 §4.7 login-CSRF protection) actually rejects a
+// mismatched cookieState, and that doing so does NOT consume the real
+// ceremony via ephemeral.Take -- an attacker's mismatched attempt must
+// not burn the legitimate ceremony a victim's browser could still
+// complete. Proven by immediately following the rejected attempt with
+// the correct (cookieState == state) call and confirming it succeeds.
+func TestFinishLogin_StateCookieMismatchRejected(t *testing.T) {
+	ctx := context.Background()
+	idp := newFakeIdP(t)
+	o := newTestOIDCWithIdP(t, idp)
+
+	state, nonce := beginAndExtractState(t, o)
+	now := time.Now()
+	idp.nextClaims = map[string]any{
+		"iss": idp.server.URL, "sub": "user-123", "aud": "test-client",
+		"exp": now.Add(time.Hour).Unix(), "iat": now.Unix(),
+		"nonce": nonce, "tenant": "acme",
+	}
+
+	if _, _, err := o.FinishLogin(ctx, "wrong-cookie-value", state, "fake-auth-code"); !errors.Is(err, oidc.ErrInvalidToken) {
+		t.Fatalf("got %v, want ErrInvalidToken", err)
+	}
+
+	// The mismatched attempt above must not have consumed the ceremony
+	// via ephemeral.Take -- the legitimate call (matching cookieState)
+	// must still succeed.
+	if _, _, err := o.FinishLogin(ctx, state, state, "fake-auth-code"); err != nil {
+		t.Fatalf("legitimate FinishLogin after mismatched attempt: %v", err)
+	}
+}
+
+// TestFinishLogin_EmptyStateCookieRejected proves an empty/absent state
+// cookie is rejected rather than treated as an unconditional match.
+func TestFinishLogin_EmptyStateCookieRejected(t *testing.T) {
+	ctx := context.Background()
+	idp := newFakeIdP(t)
+	o := newTestOIDCWithIdP(t, idp)
+
+	state, _ := beginAndExtractState(t, o)
+
+	if _, _, err := o.FinishLogin(ctx, "", state, "fake-auth-code"); !errors.Is(err, oidc.ErrInvalidToken) {
 		t.Fatalf("got %v, want ErrInvalidToken", err)
 	}
 }
