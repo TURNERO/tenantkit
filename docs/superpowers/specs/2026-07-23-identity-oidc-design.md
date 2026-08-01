@@ -65,14 +65,19 @@ Out of scope:
 ```
 tenantkit/identity/oidc/
   oidc.go        // Config, OIDC, New, per-(tenant,provider) cache
-  login.go       // BeginLogin, BeginLoginByDomain, FinishLogin
-  session.go     // Authenticate, SetSessionCookie/ClearSessionCookie, SessionCookieName
+  begin.go       // BeginLogin, BeginLoginByDomain
+  finish.go      // FinishLogin
+  session.go     // Authenticate, Logout, Set/ClearSessionCookie, Set/ClearStateCookie
   claims.go       // claims -> tenantkit.Identity mapping, applying ClaimsMapping defaults
   store.go       // SessionStore, EphemeralStore interfaces
   errors.go      // sentinel errors
   memstore/      // in-memory reference implementation
   storetest/     // conformance suite for SessionStore/EphemeralStore
 ```
+
+(The implementation plan split this section's originally-proposed single
+`login.go` into `begin.go`/`finish.go`, one per task, so each task's
+file is self-contained -- reflected above.)
 
 ## Design decisions
 
@@ -200,7 +205,7 @@ var (
 
 ## Login ceremony
 
-**`BeginLogin(ctx, tenantID, providerID string) (redirectURL string, err error)`**
+**`BeginLogin(ctx, tenantID, providerID string) (redirectURL, state string, err error)`**
 1. Resolve the `(tenantID, providerID)`'s `*providerClient` from the
    cache; on a miss, `providers.GetOIDCProvider(ctx, tenantID,
    providerID)` (→ `ErrUnknownProvider` if `store.ErrNotFound`), then
@@ -216,39 +221,47 @@ var (
    (5 minutes, matching `identity/local`'s `webauthnCeremonyTTL`
    precedent: comfortably covers a real browser/IdP redirect round-trip,
    no evidence any consumer needs it tunable).
-4. Return `oauth2Config.AuthCodeURL(state, oidc.Nonce(nonce))`. The
-   consumer's login handler redirects the browser there.
+4. Return `oauth2Config.AuthCodeURL(state, oidc.Nonce(nonce))` and
+   `state` itself. The consumer's login handler sets `state` as a
+   cookie via `SetStateCookie`, then redirects the browser to the
+   returned URL -- see "Security considerations" for why `state` is
+   returned directly rather than only embedded in the URL.
 
-**`BeginLoginByDomain(ctx, domain string) (redirectURL string, err error)`**
+**`BeginLoginByDomain(ctx, domain string) (redirectURL, state string, err error)`**
 Looks up `(tenantID, providerID)` via `providers.GetOIDCProviderByDomain`
 (→ `ErrUnknownProvider` if `store.ErrNotFound`), then calls `BeginLogin`.
 Pure convenience for an identifier-first ("enter your email") login
 page -- saves every such consumer writing the same two-line glue, since
 `*OIDC` already holds the store handle `BeginLogin` needs anyway.
 
-**`FinishLogin(ctx, state, code string) (identity *tenantkit.Identity, sessionToken string, err error)`**
-1. `ephemeral.Take(ctx, state)` -- single-use; a replayed callback (or
+**`FinishLogin(ctx, cookieState, state, code string) (identity *tenantkit.Identity, sessionToken string, err error)`**
+1. Compare `cookieState` (read from the `StateCookieName` cookie by the
+   consumer's callback handler) against `state` (the callback's query
+   parameter) -- reject with `ErrInvalidToken` on any mismatch or if
+   `cookieState` is empty, before ever touching `EphemeralStore`. See
+   "Security considerations".
+2. `ephemeral.Take(ctx, state)` -- single-use; a replayed callback (or
    one for an expired ceremony) fails here (`ErrNotFound`/`ErrExpired`).
    Decode `{tenantID, providerID, nonce}`.
-2. Resolve the `(tenantID, providerID)`'s cached `*providerClient` (same
+3. Resolve the `(tenantID, providerID)`'s cached `*providerClient` (same
    lazy-build path as step 1 of `BeginLogin` -- a different process
    handling the callback than the one that handled `BeginLogin` just
    costs a cache miss, not a correctness problem, since the ceremony
    state itself travels via `EphemeralStore`, not in-memory).
-3. `oauth2Config.Exchange(ctx, code)` to get the token response.
-4. Pull the raw ID token from `token.Extra("id_token").(string)` --
+4. `oauth2Config.Exchange(ctx, code)` to get the token response.
+5. Pull the raw ID token from `token.Extra("id_token").(string)` --
    `ErrInvalidToken` if absent or not a string.
-5. `verifier.Verify(ctx, rawIDToken)` -- checks signature, issuer,
+6. `verifier.Verify(ctx, rawIDToken)` -- checks signature, issuer,
    audience, and expiry; wrap any failure as `ErrInvalidToken`.
-6. Compare the verified token's `Nonce` field against the ceremony's
+7. Compare the verified token's `Nonce` field against the ceremony's
    stored `nonce` -- mismatch is `ErrInvalidToken`.
-7. Decode the token's claims into `map[string]any` and map them to a
+8. Decode the token's claims into `map[string]any` and map them to a
    `*tenantkit.Identity` via `mapping` (see Claims mapping below) --
    any missing/malformed required claim is `ErrInvalidToken`.
-8. Verify `identity.TenantID == tenantID` (the tenant this ceremony was
+9. Verify `identity.TenantID == tenantID` (the tenant this ceremony was
    started for) -- mismatch is `ErrInvalidToken` (see "Tenant-claim
    verification" design decision above).
-9. `sessions.CreateSession(ctx, identity, cfg.SessionTTL)`. Return
+10. `sessions.CreateSession(ctx, identity, cfg.SessionTTL)`. Return
    `identity` (e.g. for the consumer to render a welcome page) and the
    session token (for the consumer to set via `SetSessionCookie`).
 
@@ -270,6 +283,51 @@ without `Logout`, a consumer had no way to invalidate a session without
 reaching into the `SessionStore` implementation directly. Mirrors
 `identity/local.Logout` exactly, including its idempotency (deleting an
 already-expired or unknown token is not an error).
+
+## Security considerations
+
+**Login ceremony is bound to the browser via a state cookie.** Added
+during the final whole-branch review: the ceremony described above
+originally had no mechanism tying the `state`/`code` callback to the
+same browser that started it via `BeginLogin` -- the login-CSRF gap
+[RFC 9700 §4.7](https://www.rfc-editor.org/rfc/rfc9700.html#section-4.7)
+addresses. Without this binding, an attacker could start their own
+ceremony, capture their own valid `(state, code)` pair, and lure a
+victim's browser to the callback URL with those values -- the victim's
+browser would silently receive a session bound to the *attacker's*
+identity. `httpmw`/`grpcmw`'s existing tenant-mismatch guard bounds the
+blast radius to same-tenant attacks (a cross-tenant forced login is
+rejected with 403), but the gap was real and, critically, the original
+API made it impossible for a consumer to fix themselves -- `BeginLogin`
+never exposed the `state` value.
+
+Fixed by adding `StateCookieName`/`SetStateCookie`/`ClearStateCookie`
+(same pattern as the session-cookie helpers) and changing signatures:
+
+```go
+func (o *OIDC) BeginLogin(ctx context.Context, tenantID, providerID string) (redirectURL, state string, err error)
+func (o *OIDC) BeginLoginByDomain(ctx context.Context, domain string) (redirectURL, state string, err error)
+func (o *OIDC) FinishLogin(ctx context.Context, cookieState, state, code string) (*tenantkit.Identity, string, error)
+```
+
+A consumer's login handler sets `state` as a cookie via
+`SetStateCookie` before redirecting to `redirectURL`; the callback
+handler reads that cookie back (`r.Cookie(oidc.StateCookieName)`) and
+passes its value as `FinishLogin`'s `cookieState` argument.
+`FinishLogin` rejects the ceremony with `ErrInvalidToken` if
+`cookieState` is empty or doesn't match the callback's `state` --
+checked *before* the ceremony is looked up in `EphemeralStore`, so a
+forged/mismatched attempt never consumes the legitimate ceremony (a
+victim's browser retrying with the correct cookie still succeeds).
+`SetStateCookie`'s `MaxAge` matches `loginCeremonyTTL`, so the cookie
+can't outlive the ceremony it protects.
+
+**Out of scope, not addressed by this plan:** CSRF protection on the
+consumer's own login-initiation endpoint (the page/handler that calls
+`BeginLogin`) is the consumer's responsibility, same as any other
+state-changing endpoint in their application -- `identity/oidc` only
+protects the OAuth2 ceremony itself, from `BeginLogin` through
+`FinishLogin`.
 
 ## Claims mapping
 

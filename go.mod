@@ -3,9 +3,12 @@ module github.com/TURNERO/tenantkit
 go 1.25.0
 
 require (
+	github.com/coreos/go-oidc/v3 v3.20.0
 	github.com/descope/virtualwebauthn v1.0.5
+	github.com/go-jose/go-jose/v4 v4.1.4
 	github.com/go-webauthn/webauthn v0.17.4
 	golang.org/x/crypto v0.54.0
+	golang.org/x/oauth2 v0.36.0
 	google.golang.org/grpc v1.82.1
 	modernc.org/sqlite v1.54.0
 )
