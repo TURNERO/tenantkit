@@ -48,10 +48,15 @@ func (u *webauthnUser) WebAuthnCredentials() []webauthn.Credential { return u.cr
 // webauthnCeremony is the payload saved in EphemeralStore between a
 // ceremony's Begin and Finish calls -- go-webauthn's SessionData plus
 // which user this ceremony belongs to (FinishWebAuthnLogin doesn't take
-// tenantID/userID again; this is where that comes from).
+// tenantID/userID again; this is where that comes from). Username is
+// only populated for login ceremonies (empty for registration) -- it's
+// what FinishWebAuthnLogin uses to record a LoginLimiter failure or
+// success against the same key BeginWebAuthnLogin already checked,
+// without an extra UserStore round-trip.
 type webauthnCeremony struct {
 	TenantID    string               `json:"tenant_id"`
 	UserID      string               `json:"user_id"`
+	Username    string               `json:"username"`
 	SessionData webauthn.SessionData `json:"session_data"`
 }
 
@@ -86,7 +91,7 @@ func (l *Local) BeginWebAuthnRegistration(ctx context.Context, tenantID, userID 
 		return nil, "", fmt.Errorf("tenantkit/identity/local: begin webauthn registration: %w", err)
 	}
 
-	ceremonyToken, err := l.saveCeremony(ctx, tenantID, userID, *sessionData)
+	ceremonyToken, err := l.saveCeremony(ctx, tenantID, userID, "", *sessionData)
 	if err != nil {
 		return nil, "", err
 	}
@@ -124,8 +129,20 @@ func (l *Local) FinishWebAuthnRegistration(ctx context.Context, tenantID, userID
 // BeginWebAuthnLogin starts a passkey login for username within
 // tenantID. It returns the challenge to send the browser as JSON, and a
 // ceremonyToken the consumer's handler must round-trip back to
-// FinishWebAuthnLogin.
+// FinishWebAuthnLogin. If a Config.LoginLimiter is configured and the
+// account is currently locked out, it returns ErrTooManyAttempts before
+// generating a challenge.
 func (l *Local) BeginWebAuthnLogin(ctx context.Context, tenantID, username string) (*protocol.CredentialAssertion, string, error) {
+	if l.cfg.LoginLimiter != nil {
+		allowed, err := l.cfg.LoginLimiter.Allow(ctx, tenantID, username)
+		if err != nil {
+			return nil, "", fmt.Errorf("tenantkit/identity/local: check login rate limit: %w", err)
+		}
+		if !allowed {
+			return nil, "", ErrTooManyAttempts
+		}
+	}
+
 	ident, err := l.users.GetUserByUsername(ctx, tenantID, username)
 	if err != nil {
 		return nil, "", fmt.Errorf("tenantkit/identity/local: look up user: %w", err)
@@ -140,7 +157,7 @@ func (l *Local) BeginWebAuthnLogin(ctx context.Context, tenantID, username strin
 		return nil, "", fmt.Errorf("tenantkit/identity/local: begin webauthn login: %w", err)
 	}
 
-	ceremonyToken, err := l.saveCeremony(ctx, tenantID, ident.UserID, *sessionData)
+	ceremonyToken, err := l.saveCeremony(ctx, tenantID, ident.UserID, username, *sessionData)
 	if err != nil {
 		return nil, "", err
 	}
@@ -162,7 +179,18 @@ func (l *Local) FinishWebAuthnLogin(ctx context.Context, ceremonyToken string, r
 	}
 
 	if _, err := l.wa.FinishLogin(user, ceremony.SessionData, r); err != nil {
+		if l.cfg.LoginLimiter != nil {
+			if rerr := l.cfg.LoginLimiter.RecordFailure(ctx, ceremony.TenantID, ceremony.Username); rerr != nil {
+				return "", fmt.Errorf("tenantkit/identity/local: record login failure: %w", rerr)
+			}
+		}
 		return "", fmt.Errorf("tenantkit/identity/local: finish webauthn login: %w", err)
+	}
+
+	if l.cfg.LoginLimiter != nil {
+		if err := l.cfg.LoginLimiter.RecordSuccess(ctx, ceremony.TenantID, ceremony.Username); err != nil {
+			return "", fmt.Errorf("tenantkit/identity/local: record login success: %w", err)
+		}
 	}
 
 	token, err := l.sessions.CreateSession(ctx, ceremony.TenantID, ceremony.UserID, l.cfg.SessionTTL)
@@ -172,12 +200,12 @@ func (l *Local) FinishWebAuthnLogin(ctx context.Context, ceremonyToken string, r
 	return token, nil
 }
 
-func (l *Local) saveCeremony(ctx context.Context, tenantID, userID string, sessionData webauthn.SessionData) (string, error) {
+func (l *Local) saveCeremony(ctx context.Context, tenantID, userID, username string, sessionData webauthn.SessionData) (string, error) {
 	token, err := store.GenerateSecret()
 	if err != nil {
 		return "", fmt.Errorf("tenantkit/identity/local: generate ceremony token: %w", err)
 	}
-	payload, err := json.Marshal(webauthnCeremony{TenantID: tenantID, UserID: userID, SessionData: sessionData})
+	payload, err := json.Marshal(webauthnCeremony{TenantID: tenantID, UserID: userID, Username: username, SessionData: sessionData})
 	if err != nil {
 		return "", fmt.Errorf("tenantkit/identity/local: encode webauthn ceremony: %w", err)
 	}

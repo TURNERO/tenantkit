@@ -138,3 +138,68 @@ func TestFinishWebAuthnRegistration_TenantUserMismatch(t *testing.T) {
 		t.Fatalf("got %v, want ErrNotFound", err)
 	}
 }
+
+func TestBeginWebAuthnLogin_LockedOutAfterThreshold(t *testing.T) {
+	ctx := context.Background()
+	users := memstore.New()
+	ls := localmem.New()
+	limiter := localmem.NewLoginLimiter(3, time.Hour, time.Hour)
+	l, err := local.New(local.Config{
+		RPID:          "localhost",
+		RPOrigins:     []string{"http://localhost"},
+		RPDisplayName: "Test",
+		SessionTTL:    time.Hour,
+		ResetTokenTTL: time.Hour,
+		LoginLimiter:  limiter,
+	}, users, ls, ls, ls)
+	if err != nil {
+		t.Fatalf("local.New: %v", err)
+	}
+	if err := users.CreateUser(ctx, &tenantkit.Identity{UserID: "u1", TenantID: "acme", Username: "alice"}); err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+
+	// Register a credential so BeginWebAuthnLogin can proceed.
+	rp := virtualwebauthn.RelyingParty{ID: "localhost", Name: "Test", Origin: "http://localhost"}
+	authenticator := virtualwebauthn.NewAuthenticator()
+	credential := virtualwebauthn.NewCredential(virtualwebauthn.KeyTypeEC2)
+
+	creation, regToken, err := l.BeginWebAuthnRegistration(ctx, "acme", "u1")
+	if err != nil {
+		t.Fatalf("BeginWebAuthnRegistration: %v", err)
+	}
+	creationJSON, err := json.Marshal(creation.Response)
+	if err != nil {
+		t.Fatalf("marshal creation: %v", err)
+	}
+	attOpts, err := virtualwebauthn.ParseAttestationOptions(string(creationJSON))
+	if err != nil {
+		t.Fatalf("ParseAttestationOptions: %v", err)
+	}
+	attestationResp := virtualwebauthn.CreateAttestationResponse(rp, authenticator, credential, *attOpts)
+	if err := l.FinishWebAuthnRegistration(ctx, "acme", "u1", regToken, jsonRequest(attestationResp)); err != nil {
+		t.Fatalf("FinishWebAuthnRegistration: %v", err)
+	}
+	authenticator.AddCredential(credential)
+
+	// Each failed attempt consumes a fresh ceremony (FinishWebAuthnLogin
+	// takes the ceremony token single-use regardless of outcome), so a
+	// malformed assertion body on each Finish is enough to drive
+	// wa.FinishLogin to fail and trigger RecordFailure.
+	for i := 0; i < 3; i++ {
+		_, loginToken, err := l.BeginWebAuthnLogin(ctx, "acme", "alice")
+		if err != nil {
+			t.Fatalf("attempt %d: BeginWebAuthnLogin: %v", i, err)
+		}
+		if _, err := l.FinishWebAuthnLogin(ctx, loginToken, jsonRequest("")); err == nil {
+			t.Fatalf("attempt %d: expected FinishWebAuthnLogin to fail on malformed assertion", i)
+		}
+	}
+
+	// Locked out now -- BeginWebAuthnLogin must reject before even
+	// generating a new challenge, so even a legitimate passkey never
+	// gets the chance to be tried.
+	if _, _, err := l.BeginWebAuthnLogin(ctx, "acme", "alice"); !errors.Is(err, local.ErrTooManyAttempts) {
+		t.Fatalf("got %v, want ErrTooManyAttempts", err)
+	}
+}
