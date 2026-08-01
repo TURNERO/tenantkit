@@ -99,6 +99,9 @@ func (l *Local) recordLoginFailure(ctx context.Context, tenantID, username strin
 	return wantErr
 }
 
+// Logout deletes the session identified by token. Deleting an
+// already-expired or unknown token is not an error -- the end state (no
+// valid session for that token) is the same either way.
 func (l *Local) Logout(ctx context.Context, token string) error {
 	if err := l.sessions.DeleteSession(ctx, token); err != nil {
 		return fmt.Errorf("tenantkit/identity/local: logout: %w", err)
