@@ -1,7 +1,8 @@
 // Package memstore is an in-memory implementation of identity/local's
-// storage interfaces. It exists for tests -- both tenantkit's own and a
-// consumer's -- not as a production backend: nothing is persisted, and
-// every method takes a single mutex.
+// storage interfaces, including a LoginLimiter (see NewLoginLimiter). It
+// exists for tests -- both tenantkit's own and a consumer's -- not as a
+// production backend: nothing is persisted, and every method takes a
+// single mutex.
 package memstore
 
 import (

@@ -36,13 +36,25 @@ func (l *Local) SetPassword(ctx context.Context, tenantID, userID, password stri
 // success, issues a session token. It returns ErrInvalidCredentials for
 // an unknown username, a user with no password set, and a wrong
 // password alike -- a caller can never distinguish these from the error
-// alone.
+// alone. If a Config.LoginLimiter is configured and the account is
+// currently locked out, it returns ErrTooManyAttempts before doing any
+// of that work.
 func (l *Local) LoginWithPassword(ctx context.Context, tenantID, username, password string) (string, error) {
+	if l.cfg.LoginLimiter != nil {
+		allowed, err := l.cfg.LoginLimiter.Allow(ctx, tenantID, username)
+		if err != nil {
+			return "", fmt.Errorf("tenantkit/identity/local: check login rate limit: %w", err)
+		}
+		if !allowed {
+			return "", ErrTooManyAttempts
+		}
+	}
+
 	ident, err := l.users.GetUserByUsername(ctx, tenantID, username)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			_ = bcrypt.CompareHashAndPassword([]byte(dummyHash), []byte(password))
-			return "", ErrInvalidCredentials
+			return "", l.recordLoginFailure(ctx, tenantID, username, ErrInvalidCredentials)
 		}
 		return "", fmt.Errorf("tenantkit/identity/local: look up user: %w", err)
 	}
@@ -51,13 +63,17 @@ func (l *Local) LoginWithPassword(ctx context.Context, tenantID, username, passw
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
 			_ = bcrypt.CompareHashAndPassword([]byte(dummyHash), []byte(password))
-			return "", ErrInvalidCredentials
+			return "", l.recordLoginFailure(ctx, tenantID, username, ErrInvalidCredentials)
 		}
 		return "", fmt.Errorf("tenantkit/identity/local: get password hash: %w", err)
 	}
 
 	if err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)); err != nil {
-		return "", ErrInvalidCredentials
+		return "", l.recordLoginFailure(ctx, tenantID, username, ErrInvalidCredentials)
+	}
+
+	if err := l.recordLoginSuccess(ctx, tenantID, username); err != nil {
+		return "", err
 	}
 
 	token, err := l.sessions.CreateSession(ctx, tenantID, ident.UserID, l.cfg.SessionTTL)

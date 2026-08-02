@@ -24,6 +24,11 @@ type Config struct {
 	SessionTTL time.Duration
 	// ResetTokenTTL is how long a password-reset token stays valid.
 	ResetTokenTTL time.Duration
+	// LoginLimiter is optional. When nil, login attempts are never
+	// rate-limited (today's behavior, unchanged) -- matches how
+	// httpmw.Config.IdentityProvider being nil skips identity
+	// resolution entirely, rather than erroring.
+	LoginLimiter LoginLimiter
 }
 
 // Local is tenantkit's built-in password + WebAuthn identity provider.

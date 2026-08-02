@@ -126,3 +126,39 @@ func TestLogout(t *testing.T) {
 		t.Fatalf("second Logout: %v", err)
 	}
 }
+
+func TestLoginWithPassword_LockedOutAfterThreshold(t *testing.T) {
+	ctx := context.Background()
+	users := memstore.New()
+	ls := localmem.New()
+	limiter := localmem.NewLoginLimiter(3, time.Hour, time.Hour)
+	l, err := local.New(local.Config{
+		RPID:          "localhost",
+		RPOrigins:     []string{"http://localhost"},
+		RPDisplayName: "Test",
+		SessionTTL:    time.Hour,
+		ResetTokenTTL: time.Hour,
+		LoginLimiter:  limiter,
+	}, users, ls, ls, ls)
+	if err != nil {
+		t.Fatalf("local.New: %v", err)
+	}
+
+	if err := users.CreateUser(ctx, &tenantkit.Identity{UserID: "u1", TenantID: "acme", Username: "alice"}); err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	if err := l.SetPassword(ctx, "acme", "u1", "correct horse battery staple"); err != nil {
+		t.Fatalf("SetPassword: %v", err)
+	}
+
+	for i := 0; i < 3; i++ {
+		if _, err := l.LoginWithPassword(ctx, "acme", "alice", "wrong"); !errors.Is(err, local.ErrInvalidCredentials) {
+			t.Fatalf("attempt %d: got %v, want ErrInvalidCredentials", i, err)
+		}
+	}
+
+	// Locked out now -- even the correct password must be rejected.
+	if _, err := l.LoginWithPassword(ctx, "acme", "alice", "correct horse battery staple"); !errors.Is(err, local.ErrTooManyAttempts) {
+		t.Fatalf("got %v, want ErrTooManyAttempts", err)
+	}
+}
