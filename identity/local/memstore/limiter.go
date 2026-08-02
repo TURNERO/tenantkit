@@ -11,13 +11,14 @@ import (
 // LoginLimiter is an in-memory reference implementation of
 // local.LoginLimiter: a sliding-window failure count per (tenantID,
 // username). Not a production backend -- see package doc. In
-// particular, records is unbounded: a distinct (tenantID, username)
-// that fails exactly once and is never retried leaves a permanent
-// entry behind (RecordFailure's opportunistic cleanup only reclaims a
-// key on a later call for that same key, once its failures and any
-// lockout have both expired). A caller exposed to unauthenticated
-// username-spraying at volume should not use this as a production
-// backend for that reason.
+// particular, records is unbounded: once a (tenantID, username) key
+// gets its first failure entry, that entry persists for the process's
+// lifetime -- it is only ever removed by a later RecordSuccess call
+// for that exact same key, never automatically. RecordFailure never
+// deletes a record, even once its failures have aged out of the
+// window and any lockout has expired. A caller exposed to
+// unauthenticated username-spraying at volume should not use this as
+// a production backend for that reason.
 type LoginLimiter struct {
 	mu          sync.Mutex
 	maxAttempts int
@@ -46,6 +47,15 @@ type limiterRecord struct {
 // duration window (see the design spec's "Design decisions" for why
 // sliding rather than fixed).
 func NewLoginLimiter(maxAttempts int, window, lockout time.Duration) *LoginLimiter {
+	if maxAttempts <= 0 {
+		panic("memstore: NewLoginLimiter: maxAttempts must be positive")
+	}
+	if window <= 0 {
+		panic("memstore: NewLoginLimiter: window must be positive")
+	}
+	if lockout <= 0 {
+		panic("memstore: NewLoginLimiter: lockout must be positive")
+	}
 	return &LoginLimiter{
 		maxAttempts: maxAttempts,
 		window:      window,
@@ -93,15 +103,6 @@ func (l *LoginLimiter) RecordFailure(ctx context.Context, tenantID, username str
 		rec.lockedUntil = now.Add(l.lockout)
 	}
 
-	// Opportunistic cleanup: a record with no failures left in the
-	// window and no active (or already-expired) lockout carries no
-	// information worth keeping -- don't leave an empty record behind
-	// forever. (No TTL sweep or background goroutine here by design;
-	// this only reclaims what a RecordFailure call happens to leave
-	// empty.)
-	if len(rec.failures) == 0 && (rec.lockedUntil.IsZero() || rec.lockedUntil.Before(now)) {
-		delete(l.records, key)
-	}
 	return nil
 }
 
