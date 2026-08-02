@@ -16,6 +16,12 @@ var (
 	ErrInvalidCredentials = errors.New("tenantkit/identity/local: invalid credentials")
 	// ErrTooManyAttempts is returned by LoginWithPassword and
 	// BeginWebAuthnLogin when a configured LoginLimiter reports the
-	// account is currently locked out.
+	// account is currently locked out. The rate-limit gate is enforced
+	// at BeginWebAuthnLogin only, not at FinishWebAuthnLogin -- a
+	// ceremony token obtained before lockout engaged can still be
+	// redeemed after the account locks. This is a known, accepted
+	// property, not an oversight: ceremonies expire after
+	// webauthnCeremonyTTL (5 minutes) and still require a valid
+	// signature to redeem.
 	ErrTooManyAttempts = errors.New("tenantkit/identity/local: too many attempts")
 )
