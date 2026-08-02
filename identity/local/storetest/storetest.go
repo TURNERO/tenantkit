@@ -2,8 +2,8 @@
 // identity/local's storage interfaces. A consumer's own store
 // implementation can run these against a fresh instance to prove it
 // satisfies the documented behavior of local.CredentialStore,
-// local.SessionStore, and local.EphemeralStore -- not just that it
-// compiles against the interface.
+// local.SessionStore, local.EphemeralStore, and local.LoginLimiter --
+// not just that it compiles against the interface.
 package storetest
 
 import (
@@ -193,6 +193,16 @@ func TestEphemeralStore(t *testing.T, s local.EphemeralStore) {
 func TestLoginLimiter(t *testing.T, limiter local.LoginLimiter, maxAttempts int) {
 	t.Helper()
 	ctx := context.Background()
+
+	t.Run("AllowedForFreshKey", func(t *testing.T) {
+		allowed, err := limiter.Allow(ctx, "acme", "eve")
+		if err != nil {
+			t.Fatalf("Allow: %v", err)
+		}
+		if !allowed {
+			t.Fatal("expected allowed for a brand-new key with zero failures recorded")
+		}
+	})
 
 	t.Run("AllowedBelowThreshold", func(t *testing.T) {
 		for i := 0; i < maxAttempts-1; i++ {

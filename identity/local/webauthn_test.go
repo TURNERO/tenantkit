@@ -203,3 +203,92 @@ func TestBeginWebAuthnLogin_LockedOutAfterThreshold(t *testing.T) {
 		t.Fatalf("got %v, want ErrTooManyAttempts", err)
 	}
 }
+
+// TestLoginLimiter_SharedAcrossPasswordAndWebAuthn proves the spec's
+// headline claim: "any failed authentication attempt, regardless of
+// method, counts against the same lockout." Password failures alone
+// drive the account past the threshold; a WebAuthn login attempt for
+// the same username must then also be rejected, since both methods
+// key RecordFailure/Allow off the same (tenantID, username).
+func TestLoginLimiter_SharedAcrossPasswordAndWebAuthn(t *testing.T) {
+	ctx := context.Background()
+	users := memstore.New()
+	ls := localmem.New()
+	limiter := localmem.NewLoginLimiter(3, time.Hour, time.Hour)
+	l, err := local.New(local.Config{
+		RPID:          "localhost",
+		RPOrigins:     []string{"http://localhost"},
+		RPDisplayName: "Test",
+		SessionTTL:    time.Hour,
+		ResetTokenTTL: time.Hour,
+		LoginLimiter:  limiter,
+	}, users, ls, ls, ls)
+	if err != nil {
+		t.Fatalf("local.New: %v", err)
+	}
+	if err := users.CreateUser(ctx, &tenantkit.Identity{UserID: "u1", TenantID: "acme", Username: "alice"}); err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	if err := l.SetPassword(ctx, "acme", "u1", "correct horse battery staple"); err != nil {
+		t.Fatalf("SetPassword: %v", err)
+	}
+
+	// Drive enough failed password logins to hit the shared lockout
+	// threshold.
+	for i := 0; i < 3; i++ {
+		if _, err := l.LoginWithPassword(ctx, "acme", "alice", "wrong"); !errors.Is(err, local.ErrInvalidCredentials) {
+			t.Fatalf("attempt %d: got %v, want ErrInvalidCredentials", i, err)
+		}
+	}
+
+	// The lockout is keyed on (tenantID, username), not the auth
+	// method -- a WebAuthn login attempt for the same username must
+	// now also be rejected, proving the two methods share one counter.
+	if _, _, err := l.BeginWebAuthnLogin(ctx, "acme", "alice"); !errors.Is(err, local.ErrTooManyAttempts) {
+		t.Fatalf("got %v, want ErrTooManyAttempts", err)
+	}
+}
+
+// TestBeginWebAuthnLogin_UnknownUsernameRecordsFailure proves fix #1:
+// an unknown username probed via BeginWebAuthnLogin now counts toward
+// that username's own lockout, closing what would otherwise be a
+// rate-limit-free enumeration oracle (WebAuthn login didn't share
+// LoginWithPassword's dummy-hash-then-record pattern for unknown
+// users). Repeating past the threshold must flip the error from the
+// lookup failure to ErrTooManyAttempts.
+func TestBeginWebAuthnLogin_UnknownUsernameRecordsFailure(t *testing.T) {
+	ctx := context.Background()
+	users := memstore.New()
+	ls := localmem.New()
+	limiter := localmem.NewLoginLimiter(3, time.Hour, time.Hour)
+	l, err := local.New(local.Config{
+		RPID:          "localhost",
+		RPOrigins:     []string{"http://localhost"},
+		RPDisplayName: "Test",
+		SessionTTL:    time.Hour,
+		ResetTokenTTL: time.Hour,
+		LoginLimiter:  limiter,
+	}, users, ls, ls, ls)
+	if err != nil {
+		t.Fatalf("local.New: %v", err)
+	}
+
+	for i := 0; i < 3; i++ {
+		if _, _, err := l.BeginWebAuthnLogin(ctx, "acme", "nobody"); err == nil || errors.Is(err, local.ErrTooManyAttempts) {
+			t.Fatalf("attempt %d: got %v, want a non-nil, non-lockout lookup error", i, err)
+		}
+	}
+
+	// The unknown username itself is now locked out -- provable
+	// directly against the limiter, and via a further
+	// BeginWebAuthnLogin call returning ErrTooManyAttempts instead of
+	// the original lookup error.
+	if allowed, err := limiter.Allow(ctx, "acme", "nobody"); err != nil {
+		t.Fatalf("Allow: %v", err)
+	} else if allowed {
+		t.Fatal("expected unknown username to be locked out after repeated probing")
+	}
+	if _, _, err := l.BeginWebAuthnLogin(ctx, "acme", "nobody"); !errors.Is(err, local.ErrTooManyAttempts) {
+		t.Fatalf("got %v, want ErrTooManyAttempts", err)
+	}
+}
