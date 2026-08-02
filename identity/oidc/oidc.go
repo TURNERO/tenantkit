@@ -97,6 +97,9 @@ func (o *OIDC) resolveProviderClient(ctx context.Context, tenantID, providerID s
 		}
 		return nil, fmt.Errorf("tenantkit/identity/oidc: look up provider: %w", err)
 	}
+	if p.ClaimsMapping.TenantIDClaim == "" {
+		return nil, fmt.Errorf("tenantkit/identity/oidc: provider %s/%s: claims mapping TenantIDClaim is required: %w", tenantID, providerID, ErrInvalidProviderConfig)
+	}
 
 	provider, err := goidc.NewProvider(ctx, p.IssuerURL)
 	if err != nil {
