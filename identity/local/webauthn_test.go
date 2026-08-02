@@ -292,3 +292,122 @@ func TestBeginWebAuthnLogin_UnknownUsernameRecordsFailure(t *testing.T) {
 		t.Fatalf("got %v, want ErrTooManyAttempts", err)
 	}
 }
+
+// TestBeginWebAuthnLogin_NoCredentialsRecordsFailure proves fix #1's
+// first bug from the second whole-branch review: an existing user
+// with zero registered passkeys was a sharper enumeration signal than
+// the unknown-username case it was supposed to close --
+// CredentialStore.GetWebAuthnCredentials returns an empty slice (not
+// an error), so loadUserForWebAuthn succeeded and the previous code
+// let this sail through unrecorded (the actual failure only surfaced
+// one line later, from wa.BeginLogin, on a branch that never called
+// recordLoginFailure). Repeating past the threshold must now also
+// lock this username out, just like the unknown-username case.
+func TestBeginWebAuthnLogin_NoCredentialsRecordsFailure(t *testing.T) {
+	ctx := context.Background()
+	users := memstore.New()
+	ls := localmem.New()
+	limiter := localmem.NewLoginLimiter(3, time.Hour, time.Hour)
+	l, err := local.New(local.Config{
+		RPID:          "localhost",
+		RPOrigins:     []string{"http://localhost"},
+		RPDisplayName: "Test",
+		SessionTTL:    time.Hour,
+		ResetTokenTTL: time.Hour,
+		LoginLimiter:  limiter,
+	}, users, ls, ls, ls)
+	if err != nil {
+		t.Fatalf("local.New: %v", err)
+	}
+	// alice exists but never registered a passkey.
+	if err := users.CreateUser(ctx, &tenantkit.Identity{UserID: "u1", TenantID: "acme", Username: "alice"}); err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+
+	for i := 0; i < 3; i++ {
+		if _, _, err := l.BeginWebAuthnLogin(ctx, "acme", "alice"); err == nil || errors.Is(err, local.ErrTooManyAttempts) {
+			t.Fatalf("attempt %d: got %v, want a non-nil, non-lockout error", i, err)
+		}
+	}
+
+	// alice herself is now locked out -- provable directly against the
+	// limiter, and via a further BeginWebAuthnLogin call returning
+	// ErrTooManyAttempts.
+	if allowed, err := limiter.Allow(ctx, "acme", "alice"); err != nil {
+		t.Fatalf("Allow: %v", err)
+	} else if allowed {
+		t.Fatal("expected a user with no registered passkeys to be locked out after repeated probing")
+	}
+	if _, _, err := l.BeginWebAuthnLogin(ctx, "acme", "alice"); !errors.Is(err, local.ErrTooManyAttempts) {
+		t.Fatalf("got %v, want ErrTooManyAttempts", err)
+	}
+}
+
+// errGetUser is the sentinel error erroringGetUserStore.GetUser
+// returns, so TestBeginWebAuthnLogin_BackendErrorDoesNotRecordFailure
+// can assert it survives wrapped, unrecorded, out of BeginWebAuthnLogin.
+var errGetUser = errors.New("erroringGetUserStore: boom")
+
+// erroringGetUserStore is a minimal store.UserStore test double: it
+// embeds a real memstore.Store (so GetUserByUsername and CreateUser
+// behave normally) but overrides GetUser to always fail with a
+// genuine backend error, not local.ErrNotFound. This simulates
+// loadUserForWebAuthn's "real GetUser/GetWebAuthnCredentials backend
+// error" failure mode described in fix #1's second bug, as distinct
+// from its tenant-mismatch (wrapped ErrNotFound) failure mode.
+type erroringGetUserStore struct {
+	*memstore.Store
+}
+
+func (s *erroringGetUserStore) GetUser(ctx context.Context, userID string) (*tenantkit.Identity, error) {
+	return nil, errGetUser
+}
+
+// TestBeginWebAuthnLogin_BackendErrorDoesNotRecordFailure proves fix
+// #1's second bug: since ident.UserID just came from a successful
+// GetUserByUsername call, loadUserForWebAuthn's only realistic
+// failure modes here are a genuine backend error, or the
+// tenant-mismatch case (wrapped ErrNotFound). Only the latter should
+// count toward lockout -- a transient database outage during a
+// passkey-login burst must not lock a real user out for the full
+// lockout duration.
+func TestBeginWebAuthnLogin_BackendErrorDoesNotRecordFailure(t *testing.T) {
+	ctx := context.Background()
+	realUsers := memstore.New()
+	users := &erroringGetUserStore{Store: realUsers}
+	ls := localmem.New()
+	limiter := localmem.NewLoginLimiter(3, time.Hour, time.Hour)
+	l, err := local.New(local.Config{
+		RPID:          "localhost",
+		RPOrigins:     []string{"http://localhost"},
+		RPDisplayName: "Test",
+		SessionTTL:    time.Hour,
+		ResetTokenTTL: time.Hour,
+		LoginLimiter:  limiter,
+	}, users, ls, ls, ls)
+	if err != nil {
+		t.Fatalf("local.New: %v", err)
+	}
+	if err := realUsers.CreateUser(ctx, &tenantkit.Identity{UserID: "u1", TenantID: "acme", Username: "alice"}); err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+
+	// GetUserByUsername succeeds (delegated to the real store), but the
+	// subsequent GetUser call inside loadUserForWebAuthn always fails
+	// with a genuine backend error -- not ErrNotFound. Run more than
+	// maxAttempts times: if this were (wrongly) recorded as a login
+	// failure, attempts past the threshold would come back as
+	// ErrTooManyAttempts instead of errGetUser.
+	for i := 0; i < 5; i++ {
+		if _, _, err := l.BeginWebAuthnLogin(ctx, "acme", "alice"); !errors.Is(err, errGetUser) {
+			t.Fatalf("attempt %d: got %v, want an error wrapping errGetUser", i, err)
+		}
+	}
+
+	// None of those backend errors should have counted toward lockout.
+	if allowed, err := limiter.Allow(ctx, "acme", "alice"); err != nil {
+		t.Fatalf("Allow: %v", err)
+	} else if !allowed {
+		t.Fatal("a genuine backend error from loadUserForWebAuthn must not count toward lockout")
+	}
+}

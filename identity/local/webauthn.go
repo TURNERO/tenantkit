@@ -152,7 +152,13 @@ func (l *Local) BeginWebAuthnLogin(ctx context.Context, tenantID, username strin
 	}
 	user, err := l.loadUserForWebAuthn(ctx, tenantID, ident.UserID)
 	if err != nil {
-		return nil, "", l.recordLoginFailure(ctx, tenantID, username, err)
+		if errors.Is(err, ErrNotFound) {
+			return nil, "", l.recordLoginFailure(ctx, tenantID, username, err)
+		}
+		return nil, "", err
+	}
+	if len(user.creds) == 0 {
+		return nil, "", l.recordLoginFailure(ctx, tenantID, username, fmt.Errorf("tenantkit/identity/local: no webauthn credentials registered: %w", ErrInvalidCredentials))
 	}
 
 	assertion, sessionData, err := l.wa.BeginLogin(user)
