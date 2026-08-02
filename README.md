@@ -61,8 +61,10 @@ the API-key generation/hashing/rotation helpers, a pluggable
 (`httpmw`, `grpcmw`), the provisioning operations package
 (`tenantkit/admin`), the admin CLI (`tools/cmd/tenantkit-admin`), and
 `identity/local` — password (bcrypt) and WebAuthn (passkey)
-authentication, opaque-token sessions, and password reset, plus a
-persistent SQLite-backed store for it (`identity/local/sqlite`); and
+authentication, opaque-token sessions, password reset, and pluggable
+account-lockout rate-limiting (`LoginLimiter`, with an in-memory
+reference implementation), plus a persistent SQLite-backed store for
+it (`identity/local/sqlite`); and
 `identity/oidc` — an OAuth2 Authorization Code adapter for an external
 OIDC-compliant IdP (Auth0, Okta, Keycloak, etc.), with an in-memory
 reference session/ephemeral store (`identity/oidc/memstore`) and a
@@ -70,7 +72,8 @@ conformance suite (`identity/oidc/storetest`) for a future persistent
 backend. Both satisfy the same `IdentityProvider` interface
 `httpmw`/`grpcmw` already consume, so either (or both) can be configured
 interchangeably. Remaining gaps: no persistent (SQLite) backend yet for
-`identity/oidc`'s sessions — see `docs/superpowers/specs/` for the full
+`identity/oidc`'s sessions, or for `identity/local`'s `LoginLimiter` —
+see `docs/superpowers/specs/` for the full
 design and `docs/superpowers/plans/` for implementation status. Not yet
 ready for production use.
 
