@@ -72,10 +72,8 @@ func (l *Local) LoginWithPassword(ctx context.Context, tenantID, username, passw
 		return "", l.recordLoginFailure(ctx, tenantID, username, ErrInvalidCredentials)
 	}
 
-	if l.cfg.LoginLimiter != nil {
-		if err := l.cfg.LoginLimiter.RecordSuccess(ctx, tenantID, username); err != nil {
-			return "", fmt.Errorf("tenantkit/identity/local: record login success: %w", err)
-		}
+	if err := l.recordLoginSuccess(ctx, tenantID, username); err != nil {
+		return "", err
 	}
 
 	token, err := l.sessions.CreateSession(ctx, tenantID, ident.UserID, l.cfg.SessionTTL)
@@ -83,20 +81,6 @@ func (l *Local) LoginWithPassword(ctx context.Context, tenantID, username, passw
 		return "", fmt.Errorf("tenantkit/identity/local: create session: %w", err)
 	}
 	return token, nil
-}
-
-// recordLoginFailure calls RecordFailure (if a limiter is configured)
-// and returns wantErr on success, or a wrapped error if RecordFailure
-// itself fails -- a rate-limiter backend outage becomes a visible
-// error rather than silently not counting toward lockout.
-func (l *Local) recordLoginFailure(ctx context.Context, tenantID, username string, wantErr error) error {
-	if l.cfg.LoginLimiter == nil {
-		return wantErr
-	}
-	if err := l.cfg.LoginLimiter.RecordFailure(ctx, tenantID, username); err != nil {
-		return fmt.Errorf("tenantkit/identity/local: record login failure: %w", err)
-	}
-	return wantErr
 }
 
 // Logout deletes the session identified by token. Deleting an

@@ -85,6 +85,16 @@ func (l *LoginLimiter) RecordFailure(ctx context.Context, tenantID, username str
 	if len(rec.failures) >= l.maxAttempts {
 		rec.lockedUntil = now.Add(l.lockout)
 	}
+
+	// Opportunistic cleanup: a record with no failures left in the
+	// window and no active (or already-expired) lockout carries no
+	// information worth keeping -- don't leave an empty record behind
+	// forever. (No TTL sweep or background goroutine here by design;
+	// this only reclaims what a RecordFailure call happens to leave
+	// empty.)
+	if len(rec.failures) == 0 && (rec.lockedUntil.IsZero() || rec.lockedUntil.Before(now)) {
+		delete(l.records, key)
+	}
 	return nil
 }
 

@@ -145,11 +145,14 @@ func (l *Local) BeginWebAuthnLogin(ctx context.Context, tenantID, username strin
 
 	ident, err := l.users.GetUserByUsername(ctx, tenantID, username)
 	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nil, "", l.recordLoginFailure(ctx, tenantID, username, fmt.Errorf("tenantkit/identity/local: look up user: %w", err))
+		}
 		return nil, "", fmt.Errorf("tenantkit/identity/local: look up user: %w", err)
 	}
 	user, err := l.loadUserForWebAuthn(ctx, tenantID, ident.UserID)
 	if err != nil {
-		return nil, "", err
+		return nil, "", l.recordLoginFailure(ctx, tenantID, username, err)
 	}
 
 	assertion, sessionData, err := l.wa.BeginLogin(user)
@@ -172,6 +175,13 @@ func (l *Local) FinishWebAuthnLogin(ctx context.Context, ceremonyToken string, r
 	if err != nil {
 		return "", err
 	}
+	if ceremony.Username == "" {
+		// Only a login ceremony populates Username -- a registration
+		// ceremony's token redeemed here (instead of at
+		// FinishWebAuthnRegistration) would otherwise record a
+		// LoginLimiter failure/success against (tenantID, "").
+		return "", fmt.Errorf("tenantkit/identity/local: ceremony token is not a login ceremony: %w", ErrNotFound)
+	}
 
 	user, err := l.loadUserForWebAuthn(ctx, ceremony.TenantID, ceremony.UserID)
 	if err != nil {
@@ -179,18 +189,11 @@ func (l *Local) FinishWebAuthnLogin(ctx context.Context, ceremonyToken string, r
 	}
 
 	if _, err := l.wa.FinishLogin(user, ceremony.SessionData, r); err != nil {
-		if l.cfg.LoginLimiter != nil {
-			if rerr := l.cfg.LoginLimiter.RecordFailure(ctx, ceremony.TenantID, ceremony.Username); rerr != nil {
-				return "", fmt.Errorf("tenantkit/identity/local: record login failure: %w", rerr)
-			}
-		}
-		return "", fmt.Errorf("tenantkit/identity/local: finish webauthn login: %w", err)
+		return "", l.recordLoginFailure(ctx, ceremony.TenantID, ceremony.Username, fmt.Errorf("tenantkit/identity/local: finish webauthn login: %w", err))
 	}
 
-	if l.cfg.LoginLimiter != nil {
-		if err := l.cfg.LoginLimiter.RecordSuccess(ctx, ceremony.TenantID, ceremony.Username); err != nil {
-			return "", fmt.Errorf("tenantkit/identity/local: record login success: %w", err)
-		}
+	if err := l.recordLoginSuccess(ctx, ceremony.TenantID, ceremony.Username); err != nil {
+		return "", err
 	}
 
 	token, err := l.sessions.CreateSession(ctx, ceremony.TenantID, ceremony.UserID, l.cfg.SessionTTL)
