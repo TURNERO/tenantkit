@@ -34,9 +34,13 @@ type limiterKey struct {
 
 // limiterRecord tracks recent failures (pruned to the last window on
 // every RecordFailure) and, once maxAttempts is reached, the time the
-// lockout lifts. lockedUntil is independent of window: an account
-// doesn't unlock early just because old failures aged out of the
-// counting window.
+// lockout lifts. lockedUntil is independent of window in both
+// directions: an account doesn't unlock early just because old
+// failures aged out of the counting window, and (when window >
+// lockout) a single failure right after a lockout lifts can
+// immediately re-lock the account if enough of the original failures
+// are still within window -- the counting window and the lockout
+// duration are deliberately separate concerns, not synchronized.
 type limiterRecord struct {
 	failures    []time.Time
 	lockedUntil time.Time

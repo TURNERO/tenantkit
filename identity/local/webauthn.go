@@ -152,6 +152,15 @@ func (l *Local) BeginWebAuthnLogin(ctx context.Context, tenantID, username strin
 	}
 	user, err := l.loadUserForWebAuthn(ctx, tenantID, ident.UserID)
 	if err != nil {
+		// Dead-by-construction with the bundled CredentialStore
+		// implementations (memstore, sqlite): ident.UserID just came
+		// from a successful GetUserByUsername, so loadUserForWebAuthn's
+		// tenant-mismatch check can't fire, and GetWebAuthnCredentials
+		// returns an empty slice rather than ErrNotFound for zero
+		// credentials. Kept as defensive coverage for a third-party
+		// CredentialStore that does return ErrNotFound for "no
+		// credentials" -- that should count as a login failure, same as
+		// LoginWithPassword's analogous case.
 		if errors.Is(err, ErrNotFound) {
 			return nil, "", l.recordLoginFailure(ctx, tenantID, username, err)
 		}

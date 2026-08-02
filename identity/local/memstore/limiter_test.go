@@ -75,3 +75,64 @@ func TestLoginLimiter_FailuresAccumulateAcrossTime(t *testing.T) {
 		t.Fatal("expected locked out -- all 3 failures fall within the window")
 	}
 }
+
+// TestLoginLimiter_LockoutExpires proves the "temporary" half of
+// account lockout: once lockout elapses, Allow returns true again --
+// the only other route back to allowed is RecordSuccess, which every
+// other test exercises instead. Every NewLoginLimiter call elsewhere
+// in this repo uses a 1-hour lockout, so without this test the actual
+// unlock-after-lockout path (Allow's time.Now().After(rec.lockedUntil)
+// check) is never exercised.
+func TestLoginLimiter_LockoutExpires(t *testing.T) {
+	ctx := context.Background()
+	limiter := memstore.NewLoginLimiter(3, time.Hour, 50*time.Millisecond)
+
+	for i := 0; i < 3; i++ {
+		if err := limiter.RecordFailure(ctx, "acme", "alice"); err != nil {
+			t.Fatalf("RecordFailure: %v", err)
+		}
+	}
+	if allowed, err := limiter.Allow(ctx, "acme", "alice"); err != nil {
+		t.Fatalf("Allow: %v", err)
+	} else if allowed {
+		t.Fatal("expected locked out immediately after threshold")
+	}
+
+	time.Sleep(80 * time.Millisecond) // longer than the 50ms lockout
+
+	allowed, err := limiter.Allow(ctx, "acme", "alice")
+	if err != nil {
+		t.Fatalf("Allow: %v", err)
+	}
+	if !allowed {
+		t.Fatal("expected allowed again -- lockout should have expired")
+	}
+}
+
+// TestNewLoginLimiter_PanicsOnInvalidArgs proves the constructor
+// rejects non-positive arguments rather than silently constructing a
+// limiter that never locks anyone out.
+func TestNewLoginLimiter_PanicsOnInvalidArgs(t *testing.T) {
+	cases := []struct {
+		name            string
+		maxAttempts     int
+		window, lockout time.Duration
+	}{
+		{"zero maxAttempts", 0, time.Hour, time.Hour},
+		{"negative maxAttempts", -1, time.Hour, time.Hour},
+		{"zero window", 3, 0, time.Hour},
+		{"negative window", 3, -time.Second, time.Hour},
+		{"zero lockout", 3, time.Hour, 0},
+		{"negative lockout", 3, time.Hour, -time.Second},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			defer func() {
+				if recover() == nil {
+					t.Fatal("expected a panic, got none")
+				}
+			}()
+			memstore.NewLoginLimiter(tc.maxAttempts, tc.window, tc.lockout)
+		})
+	}
+}
