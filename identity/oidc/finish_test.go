@@ -26,8 +26,9 @@ type fakeIdP struct {
 	server      *httptest.Server
 	key         *rsa.PrivateKey
 	kid         string
-	nextClaims  map[string]any // set by the test before calling FinishLogin
-	omitIDToken bool           // set by the test to make the token endpoint omit id_token
+	nextClaims  map[string]any  // set by the test before calling FinishLogin
+	omitIDToken bool            // set by the test to make the token endpoint omit id_token
+	foreignKey  *rsa.PrivateKey // set by a test to sign the next ID token with a key this IdP's JWKS never publishes
 }
 
 func newFakeIdP(t *testing.T) *fakeIdP {
@@ -80,7 +81,11 @@ func (f *fakeIdP) handleToken(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "no claims configured for this test", http.StatusInternalServerError)
 			return
 		}
-		idToken, err := f.signIDToken(f.nextClaims)
+		signingKey := f.key
+		if f.foreignKey != nil {
+			signingKey = f.foreignKey
+		}
+		idToken, err := f.signIDToken(f.nextClaims, signingKey)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -91,8 +96,8 @@ func (f *fakeIdP) handleToken(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(resp)
 }
 
-func (f *fakeIdP) signIDToken(claims map[string]any) (string, error) {
-	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.RS256, Key: f.key}, &jose.SignerOptions{
+func (f *fakeIdP) signIDToken(claims map[string]any, key *rsa.PrivateKey) (string, error) {
+	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.RS256, Key: key}, &jose.SignerOptions{
 		ExtraHeaders: map[jose.HeaderKey]any{"kid": f.kid},
 	})
 	if err != nil {
@@ -345,6 +350,68 @@ func TestFinishLogin_EmptyStateCookieRejected(t *testing.T) {
 	state, _ := beginAndExtractState(t, o)
 
 	if _, _, err := o.FinishLogin(ctx, "", state, "fake-auth-code"); !errors.Is(err, oidc.ErrInvalidToken) {
+		t.Fatalf("got %v, want ErrInvalidToken", err)
+	}
+}
+
+func TestFinishLogin_ForeignKeySignatureRejected(t *testing.T) {
+	ctx := context.Background()
+	idp := newFakeIdP(t)
+	o := newTestOIDCWithIdP(t, idp)
+
+	state, nonce := beginAndExtractState(t, o)
+
+	now := time.Now()
+	idp.nextClaims = map[string]any{
+		"iss": idp.server.URL, "sub": "user-123", "aud": "test-client",
+		"exp": now.Add(time.Hour).Unix(), "iat": now.Unix(),
+		"nonce": nonce, "tenant": "acme",
+	}
+	foreignKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	idp.foreignKey = foreignKey
+
+	if _, _, err := o.FinishLogin(ctx, state, state, "fake-auth-code"); !errors.Is(err, oidc.ErrInvalidToken) {
+		t.Fatalf("got %v, want ErrInvalidToken", err)
+	}
+}
+
+func TestFinishLogin_WrongAudienceRejected(t *testing.T) {
+	ctx := context.Background()
+	idp := newFakeIdP(t)
+	o := newTestOIDCWithIdP(t, idp)
+
+	state, nonce := beginAndExtractState(t, o)
+
+	now := time.Now()
+	idp.nextClaims = map[string]any{
+		"iss": idp.server.URL, "sub": "user-123", "aud": "some-other-client",
+		"exp": now.Add(time.Hour).Unix(), "iat": now.Unix(),
+		"nonce": nonce, "tenant": "acme",
+	}
+
+	if _, _, err := o.FinishLogin(ctx, state, state, "fake-auth-code"); !errors.Is(err, oidc.ErrInvalidToken) {
+		t.Fatalf("got %v, want ErrInvalidToken", err)
+	}
+}
+
+func TestFinishLogin_WrongIssuerRejected(t *testing.T) {
+	ctx := context.Background()
+	idp := newFakeIdP(t)
+	o := newTestOIDCWithIdP(t, idp)
+
+	state, nonce := beginAndExtractState(t, o)
+
+	now := time.Now()
+	idp.nextClaims = map[string]any{
+		"iss": "https://not-the-real-idp.example.com", "sub": "user-123", "aud": "test-client",
+		"exp": now.Add(time.Hour).Unix(), "iat": now.Unix(),
+		"nonce": nonce, "tenant": "acme",
+	}
+
+	if _, _, err := o.FinishLogin(ctx, state, state, "fake-auth-code"); !errors.Is(err, oidc.ErrInvalidToken) {
 		t.Fatalf("got %v, want ErrInvalidToken", err)
 	}
 }
