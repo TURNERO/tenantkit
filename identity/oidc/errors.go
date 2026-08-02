@@ -13,7 +13,7 @@ var (
 	// (BeginLogin/BeginLoginByDomain/FinishLogin given a (tenantID,
 	// providerID) or domain with no matching registration).
 	ErrUnknownProvider = errors.New("tenantkit/identity/oidc: unknown provider")
-	// ErrInvalidProviderConfig wraps a provider registration that was
+	// ErrInvalidProviderConfig reports a provider registration that was
 	// found but isn't usable to build an OAuth2/OIDC client from --
 	// currently just an empty ClaimsMapping.TenantIDClaim.
 	// admin.RegisterOIDCProvider and admin.UpdateOIDCProvider already

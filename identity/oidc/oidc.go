@@ -78,8 +78,11 @@ func New(cfg Config, providers store.OIDCProviderStore, sessions SessionStore, e
 }
 
 // resolveProviderClient returns the cached *providerClient for
-// (tenantID, providerID), building and caching it on a miss. Shared by
-// BeginLogin (via BeginLogin/BeginLoginByDomain) and FinishLogin.
+// (tenantID, providerID), building and caching it on a miss -- or
+// ErrInvalidProviderConfig, without caching anything, if the
+// registration itself isn't usable (e.g. an empty
+// ClaimsMapping.TenantIDClaim). Shared by BeginLogin (via BeginLogin/
+// BeginLoginByDomain) and FinishLogin.
 func (o *OIDC) resolveProviderClient(ctx context.Context, tenantID, providerID string) (*providerClient, error) {
 	key := tenantProviderKey{tenantID: tenantID, providerID: providerID}
 
