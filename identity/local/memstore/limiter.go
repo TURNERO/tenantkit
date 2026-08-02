@@ -10,7 +10,14 @@ import (
 
 // LoginLimiter is an in-memory reference implementation of
 // local.LoginLimiter: a sliding-window failure count per (tenantID,
-// username). Not a production backend -- see package doc.
+// username). Not a production backend -- see package doc. In
+// particular, records is unbounded: a distinct (tenantID, username)
+// that fails exactly once and is never retried leaves a permanent
+// entry behind (RecordFailure's opportunistic cleanup only reclaims a
+// key on a later call for that same key, once its failures and any
+// lockout have both expired). A caller exposed to unauthenticated
+// username-spraying at volume should not use this as a production
+// backend for that reason.
 type LoginLimiter struct {
 	mu          sync.Mutex
 	maxAttempts int
