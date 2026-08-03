@@ -195,3 +195,48 @@ func TestBeginLogin_CachesProviderClient(t *testing.T) {
 		t.Fatalf("second BeginLogin (should use cache, provider was deleted): %v", err)
 	}
 }
+
+func TestBeginLogin_EmptyTenantIDClaimRejectedAndNotCached(t *testing.T) {
+	ctx := context.Background()
+	o, providers, _ := newTestOIDC(t)
+	issuerURL := newFakeDiscoveryServer(t)
+
+	if err := providers.CreateOIDCProvider(ctx, &tenantkit.OIDCProvider{
+		TenantID:      "acme",
+		ProviderID:    "okta",
+		IssuerURL:     issuerURL,
+		ClientID:      "test-client",
+		ClientSecret:  "test-secret",
+		ClaimsMapping: tenantkit.ClaimsMapping{TenantIDClaim: ""}, // misconfigured
+	}); err != nil {
+		t.Fatalf("CreateOIDCProvider: %v", err)
+	}
+
+	if _, _, err := o.BeginLogin(ctx, "acme", "okta"); !errors.Is(err, oidc.ErrInvalidProviderConfig) {
+		t.Fatalf("first BeginLogin: got %v, want ErrInvalidProviderConfig", err)
+	}
+
+	// A second call against the same bad registration must fail the
+	// same way -- proves nothing was cached from the first (failed)
+	// resolution attempt.
+	if _, _, err := o.BeginLogin(ctx, "acme", "okta"); !errors.Is(err, oidc.ErrInvalidProviderConfig) {
+		t.Fatalf("second BeginLogin: got %v, want ErrInvalidProviderConfig", err)
+	}
+
+	// Fixing the registration (e.g. via admin.UpdateOIDCProvider in a
+	// real deployment) must take effect on the very next call -- no
+	// process restart needed, since nothing bad was ever cached.
+	if err := providers.UpdateOIDCProvider(ctx, &tenantkit.OIDCProvider{
+		TenantID:      "acme",
+		ProviderID:    "okta",
+		IssuerURL:     issuerURL,
+		ClientID:      "test-client",
+		ClientSecret:  "test-secret",
+		ClaimsMapping: tenantkit.ClaimsMapping{TenantIDClaim: "tenant"},
+	}); err != nil {
+		t.Fatalf("UpdateOIDCProvider: %v", err)
+	}
+	if _, _, err := o.BeginLogin(ctx, "acme", "okta"); err != nil {
+		t.Fatalf("third BeginLogin after fixing registration: %v", err)
+	}
+}
